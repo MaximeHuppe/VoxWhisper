@@ -28,3 +28,50 @@ class DiceBCELoss(nn.Module):
         dice_loss = 1.0 - (2.0 * intersection + self.eps) / (union + self.eps)
         
         return bce_loss + dice_loss
+
+
+def per_class_dice(pred_labels, gt_labels, n_classes, eps=1e-5):
+    """
+    Integer label maps → one Dice score per class.
+
+    Empty class in both prediction and target scores 1.0 (perfect agreement
+    on absence). Returns a Python list of floats, length ``n_classes``.
+    """
+    pred_labels = pred_labels.long()
+    gt_labels = gt_labels.long()
+    scores = []
+    for class_id in range(n_classes):
+        pred_c = pred_labels == class_id
+        gt_c = gt_labels == class_id
+        intersection = (pred_c & gt_c).sum().float()
+        denom = pred_c.sum() + gt_c.sum()
+        if denom == 0:
+            scores.append(1.0)
+        else:
+            scores.append(float((2.0 * intersection + eps) / (denom + eps)))
+    return scores
+
+
+def channel_dice_from_logits(logits, target, threshold=0.5, eps=1e-5):
+    """
+    Independent per-prompt Dice after sigmoid (matches the multi-label loss).
+
+    ``logits`` and ``target`` are ``[B, N_T, D, H, W]`` (or without batch).
+    """
+    if logits.ndim == 4:
+        logits = logits.unsqueeze(0)
+        target = target.unsqueeze(0)
+    pred = torch.sigmoid(logits) > threshold
+    gt = target > 0.5
+    n_classes = logits.shape[1]
+    scores = []
+    for class_id in range(n_classes):
+        pred_c = pred[:, class_id]
+        gt_c = gt[:, class_id]
+        intersection = (pred_c & gt_c).sum().float()
+        denom = pred_c.sum() + gt_c.sum()
+        if denom == 0:
+            scores.append(1.0)
+        else:
+            scores.append(float((2.0 * intersection + eps) / (denom + eps)))
+    return scores

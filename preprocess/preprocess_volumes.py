@@ -1,79 +1,118 @@
 # preprocess/preprocess_volumes.py
+"""Config-driven T1/T2 preprocessing: full-resolution normalized NIfTI."""
+from __future__ import annotations
+
 import os
-import glob
-import numpy as np
+import sys
+
 import nibabel as nib
+import numpy as np
+from tqdm import tqdm
 
-def normalize_intensity(volume):
-    """Min-Max normalization to scale intensities to [0, 1]."""
-    vol_min = np.min(volume)
-    vol_max = np.max(volume)
-    if vol_max - vol_min > 0:
-        return (volume - vol_min) / (vol_max - vol_min)
-    return volume
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-def center_crop_or_pad_3d(volume, target_shape=(96, 96, 96)):
-    """Center crops or pads a 3D numpy array to match target dimensions."""
-    spatial_shape = volume.shape
-    output = np.zeros(target_shape, dtype=volume.dtype)
-    
-    slices_in = []
-    slices_out = []
-    
-    for i in range(3):
-        if spatial_shape[i] >= target_shape[i]:
-            start = (spatial_shape[i] - target_shape[i]) // 2
-            slices_in.append(slice(start, start + target_shape[i]))
-            slices_out.append(slice(0, target_shape[i]))
-        else:
-            start = (target_shape[i] - spatial_shape[i]) // 2
-            slices_in.append(slice(0, spatial_shape[i]))
-            slices_out.append(slice(start, start + spatial_shape[i]))
-            
-    output[tuple(slices_out)] = volume[tuple(slices_in)]
-    return output
+from src.utils.config import (  # noqa: E402
+    active_modality_keys,
+    ensure_dir,
+    load_config,
+    parse_config_args,
+    resolve_path,
+)
+from src.utils.nifti_io import (  # noqa: E402
+    normalize_intensity,
+    save_nifti,
+    subject_processed_dir,
+    volume_path,
+)
 
-def process_subject(subject_id, raw_dir, output_dir):
-    print(f"Processing Subject: {subject_id}")
-    
-    # Define file paths
-    t1_path = os.path.join(raw_dir, subject_id, "T1w", "T1w_acpc_dc_restore_1.25.nii.gz")
-    diff_path = os.path.join(raw_dir, subject_id, "T1w", "Diffusion", "data.nii.gz") # 4D DTI
-    
-    if not os.path.exists(t1_path):
-        print(f"Warning: T1 file missing for {subject_id}. Skipping.")
-        return
 
-    # 1. Load and process structural T1
-    t1_img = nib.load(t1_path)
-    t1_data = t1_img.get_fdata().astype(np.float32)
-    t1_norm = normalize_intensity(t1_data)
-    t1_cropped = center_crop_or_pad_3d(t1_norm, target_shape=(128, 128, 128))
-    
-    # 2. Load and process Diffusion (extract first b=0 volume or mean FA for simplicity)
-    # Here we load the first volume of the DTI series as our structural diffusion guide
-    diff_cropped = np.zeros((64, 64, 64), dtype=np.float32)
-    if os.path.exists(diff_path):
-        diff_img = nib.load(diff_path)
-        # Squeeze 4D to 3D by taking the first volume (index 0)
-        diff_data = diff_img.slicer[..., 0].get_fdata().astype(np.float32)
-        diff_norm = normalize_intensity(diff_data)
-        diff_cropped = center_crop_or_pad_3d(diff_norm, target_shape=(64, 64, 64))
+def resolve_volume_path(raw_dir, subject_id, volume_cfg):
+    """Resolve configured volume filename under the subject raw directory."""
+    primary = os.path.join(raw_dir, subject_id, "T1w", volume_cfg["filename"])
+    if os.path.exists(primary):
+        return primary
+    return None
 
-    # 3. Save preprocessed arrays
-    os.makedirs(output_dir, exist_ok=True)
-    out_file = os.path.join(output_dir, f"{subject_id}_preprocessed.npz")
-    np.savez_compressed(
-        out_file,
-        t1=t1_cropped[np.newaxis, ...],      # Shape: [1, 128, 128, 128]
-        diff=diff_cropped[np.newaxis, ...],  # Shape: [1, 64, 64, 64]
+
+def load_and_process_volume(path, normalization, nonzero_only):
+    """
+    Load NIfTI and normalize at full resolution.
+
+    Spatial cropping is deferred to the Dataset (50/50 patch sampling).
+    """
+    img = nib.load(path)
+    data = img.get_fdata().astype(np.float32)
+    normalized = normalize_intensity(
+        data, method=normalization, nonzero_only=nonzero_only
     )
-    print(f"Saved: {out_file}")
+    return normalized, img.affine
+
+
+def process_subject(subject_id, raw_dir, output_dir, config):
+    print(f"Processing Subject: {subject_id}")
+
+    primary, secondary = active_modality_keys(config)
+    volumes_cfg = config["data"]["volumes"]
+    prep_cfg = config["preprocessing"]
+    normalization = prep_cfg["normalization"]
+    nonzero_only = bool(prep_cfg.get("zscore_nonzero_only", True))
+
+    subject_dir = subject_processed_dir(output_dir, subject_id)
+    ensure_dir(subject_dir)
+
+    for modality in (primary, secondary):
+        if modality not in volumes_cfg:
+            print(f"Warning: modality '{modality}' missing from data.volumes. Skipping subject.")
+            return
+
+        vol_cfg = volumes_cfg[modality]
+        path = resolve_volume_path(raw_dir, subject_id, vol_cfg)
+        if path is None:
+            print(
+                f"Warning: {modality.upper()} file missing for {subject_id} "
+                f"(looked for {vol_cfg['filename']}). Skipping."
+            )
+            return
+
+        volume, affine = load_and_process_volume(
+            path,
+            normalization=normalization,
+            nonzero_only=nonzero_only,
+        )
+        out_file = volume_path(output_dir, subject_id, modality)
+        save_nifti(volume, out_file, affine=affine, dtype=np.float32)
+        print(
+            f"  Saved {modality}: {out_file} "
+            f"shape={volume.shape} range=[{volume.min():.3f}, {volume.max():.3f}]"
+        )
+
+
+def preprocess_volumes(config):
+    raw_data_dir = resolve_path(config, "data.paths.raw")
+    processed_data_dir = resolve_path(config, "data.paths.processed")
+    ensure_dir(processed_data_dir)
+
+    if not raw_data_dir.exists():
+        print(f"Error: raw data directory not found: {raw_data_dir}")
+        sys.exit(1)
+
+    subjects = sorted(
+        d
+        for d in os.listdir(raw_data_dir)
+        if os.path.isdir(os.path.join(raw_data_dir, d))
+    )
+
+    print(f"Found {len(subjects)} subjects in {raw_data_dir}")
+    print(
+        f"Normalization: {config['preprocessing']['normalization']} "
+        f"(nonzero_only={config['preprocessing'].get('zscore_nonzero_only', True)}); "
+        "keeping full resolution (patches sampled at train time)"
+    )
+    for subject in tqdm(subjects, desc="Processing subjects"):
+        process_subject(subject, str(raw_data_dir), processed_data_dir, config)
+
 
 if __name__ == "__main__":
-    raw_data_dir = "../data/raw"
-    processed_data_dir = "../data/processed"
-    
-    subjects = [d for d in os.listdir(raw_data_dir) if os.path.isdir(os.path.join(raw_data_dir, d))]
-    for subject in subjects:
-        process_subject(subject, raw_data_dir, processed_data_dir)
+    args = parse_config_args(description="Preprocess full-resolution T1/T2 volumes")
+    cfg = load_config(args.config)
+    preprocess_volumes(cfg)
