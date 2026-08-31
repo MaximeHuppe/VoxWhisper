@@ -234,9 +234,22 @@ def random_valid_center(
     return (center[0], center[1], center[2])
 
 
-def volume_center(volume_shape: Sequence[int]) -> Tuple[int, int, int]:
-    """Geometric center of a 3D volume."""
-    return tuple(int(s) // 2 for s in volume_shape)
+def foreground_centroid(
+    labels: np.ndarray,
+    positive_labels: Sequence[int],
+) -> Optional[Tuple[int, int, int]]:
+    """
+    Integer-rounded centroid of voxels whose label is in ``positive_labels``.
+
+    Returns ``None`` when no matching voxels exist.
+    """
+    pos_mask = np.zeros(labels.shape, dtype=bool)
+    for lab in positive_labels:
+        pos_mask |= labels == lab
+    voxels = np.argwhere(pos_mask)
+    if len(voxels) == 0:
+        return None
+    return tuple(int(round(c)) for c in voxels.mean(axis=0))
 
 
 def list_subject_ids(processed_root: PathLike) -> list[str]:

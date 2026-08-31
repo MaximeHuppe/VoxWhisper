@@ -127,6 +127,7 @@ def resolve_subjects(config, split: str | None, subject: str | None) -> list[str
 
 def load_model(config, checkpoint_path: Path, device: torch.device) -> VoxWhisper:
     model = VoxWhisper.from_config(config).to(device)
+    model.print_summary(config)
     try:
         ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
     except TypeError:
@@ -177,6 +178,11 @@ def evaluate_subject(
             sigma_scale=float(inf_cfg.get("sigma_scale", 0.125)),
             progress=bool(inf_cfg.get("progress", True)),
         )
+
+        print("logit shape:", tuple(logits.shape))
+        print("background logit mean:", logits[0, 0].mean().item(), "max", logits[0, 0].max().item(), "min", logits[0, 0].min().item())
+        print("optic nerve logit mean:", logits[0, 1].mean().item(), "max", logits[0, 1].max().item(), "min", logits[0, 1].min().item())
+        print("frac argmax==background:", (logits.argmax(dim=1) == 0).float().mean().item())
 
     pred_labels = logits_to_label_map(logits)[0].cpu()
     subject_dir = ensure_dir(output_dir / subject_id)

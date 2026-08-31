@@ -21,12 +21,12 @@ data:
   masks:
     filename: "{subject_id}_label.nii.gz"
 
-  # On-the-fly training patches (full volumes are stored; crops happen in Dataset)
+  # On-the-fly patches (full volumes are stored; crops happen in Dataset)
   patch:
     size: [128, 128, 128]
-    positive_ratio: 0.5          # 50% positive (nerve-centered) / 50% random
+    positive_ratio: 0.5          # train adaptive + frozen val mix
     positive_labels: [1]         # OpticNerveSeg: 1 = optic nerve
-    # validation / test: deterministic center crop of ``size``
+    val_patches_per_subject: 4   # frozen 50/50 pos/neg, seeded by splits.seed
 
   # Shape used only by generate_mock_dataset.py (must be >= patch.size)
   mock_volume_shape: [192, 192, 192]
@@ -34,7 +34,6 @@ data:
   prompts:
     - background
     - optic nerve
-    - optic chiasm
 
   download:
     bucket: hcp-openaccess
@@ -72,8 +71,8 @@ training:
   dataloader:
     shuffle: true
     drop_last: true
-    num_workers: 0
-    pin_memory: false
+    num_workers: 8
+    pin_memory: true
 
 splits:
   enabled: true

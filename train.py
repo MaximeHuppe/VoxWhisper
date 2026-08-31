@@ -5,6 +5,8 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
+from tqdm import tqdm
+
 from src.dataset import VoxWhisperDataset
 from src.models.vox_whisper import VoxWhisper
 from src.utils.config import (
@@ -15,6 +17,7 @@ from src.utils.config import (
 )
 from src.utils.metrics import DiceBCELoss
 from src.utils.splits import create_or_load_splits
+
 
 
 @torch.no_grad()
@@ -73,12 +76,14 @@ def build_loaders(config):
             train_dataset,
             shuffle=dl_cfg.get("shuffle", True),
             drop_last=dl_cfg.get("drop_last", True),
+            persistent_workers=True,
             **common_kwargs,
         )
         val_loader = DataLoader(
             val_dataset,
             shuffle=False,
             drop_last=False,
+            persistent_workers=True,
             **common_kwargs,
         )
         return train_loader, val_loader
@@ -88,6 +93,7 @@ def build_loaders(config):
         train_dataset,
         shuffle=dl_cfg.get("shuffle", True),
         drop_last=dl_cfg.get("drop_last", True),
+        persistent_workers=True,
         **common_kwargs,
     )
     return train_loader, None
@@ -115,12 +121,13 @@ def train_model(config):
     train_loader, val_loader = build_loaders(config)
 
     model = VoxWhisper.from_config(config).to(device)
+    model.print_summary(config)
     criterion = DiceBCELoss()
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
 
     print(f"Starting training on device: {device}...")
-    for epoch in range(epochs):
+    for epoch in tqdm(range(epochs), desc="Training"):
         model.train()
         epoch_loss = 0.0
 

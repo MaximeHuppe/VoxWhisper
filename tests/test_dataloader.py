@@ -182,15 +182,34 @@ def test_training_step_with_dataloader_batch():
         assert batch_loss.item() > 0
 
 
-def test_validation_dataset_uses_center_crop():
-    """training=False should yield deterministic center patches."""
+def test_validation_uses_frozen_patches_per_subject():
     with temp_test_config() as cfg:
+        n_patches = int(cfg["data"]["patch"]["val_patches_per_subject"])
         dataset = VoxWhisperDataset(cfg, training=False)
+        assert len(dataset) == len(dataset.subject_ids) * n_patches
 
-        primary_a, _, _, _ = dataset[0]
-        primary_b, _, _, _ = dataset[0]
+        epoch_a = [dataset[i] for i in range(len(dataset))]
+        epoch_b = [dataset[i] for i in range(len(dataset))]
+        for (t1_a, t2_a, _, gt_a), (t1_b, t2_b, _, gt_b) in zip(epoch_a, epoch_b):
+            torch.testing.assert_close(t1_a, t1_b)
+            torch.testing.assert_close(t2_a, t2_b)
+            torch.testing.assert_close(gt_a, gt_b)
 
-        torch.testing.assert_close(primary_a, primary_b)
+        other = VoxWhisperDataset(cfg, training=False)
+        torch.testing.assert_close(dataset[0][0], other[0][0])
+
+        nerve_channel = int(cfg["data"]["patch"]["positive_labels"][0])
+        _, _, _, gt_mask = dataset[0]
+        assert gt_mask[nerve_channel].sum() > 0
+
+
+def test_training_uses_adaptive_patch_sampling():
+    """Train crops should vary across draws of the same subject (50/50 sampling)."""
+    with temp_test_config() as cfg:
+        dataset = VoxWhisperDataset(cfg, training=True)
+        patches = [dataset[0][0] for _ in range(24)]
+        differs = any(not torch.equal(patches[0], p) for p in patches[1:])
+        assert differs, "expected adaptive train sampling to produce more than one crop"
 
 
 def test_gt_mask_channels_are_binary():
@@ -210,7 +229,8 @@ def _run_all():
         test_model_forward_accepts_dataloader_batch,
         test_model_output_spatial_dims_match_deep_supervision,
         test_training_step_with_dataloader_batch,
-        test_validation_dataset_uses_center_crop,
+        test_validation_uses_frozen_patches_per_subject,
+        test_training_uses_adaptive_patch_sampling,
         test_gt_mask_channels_are_binary,
     ]
     for test_fn in tests:

@@ -6,6 +6,7 @@ data/raw/
 data/raw_masks/
 data/processed/
 data/predictions/
+output/
 
 # Exclude pre-computed text embeddings and trained model checkpoints
 cache/*.pt

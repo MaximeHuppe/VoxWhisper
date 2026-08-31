@@ -1,10 +1,10 @@
 # src/dataset.py
-"""Config-driven dataset with 50/50 foreground-optimized patch sampling."""
+"""Config-driven dataset: adaptive train patches, frozen val/test patches."""
 from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Mapping, Optional, Sequence, Tuple
+from typing import List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 import torch
@@ -13,14 +13,16 @@ from torch.utils.data import Dataset
 from src.utils.config import active_modality_keys, resolve_path
 from src.utils.nifti_io import (
     extract_patch_3d,
+    foreground_centroid,
     label_to_multichannel,
     list_subject_ids,
     load_nifti,
     mask_path,
     random_valid_center,
-    volume_center,
     volume_path,
 )
+
+Center = Tuple[int, int, int]
 
 
 class VoxWhisperDataset(Dataset):
@@ -28,11 +30,11 @@ class VoxWhisperDataset(Dataset):
     Loads full-resolution T1/T2 + mask NIfTIs and returns fixed-size patches.
 
     Training (``training=True``):
-      - 50% positive patches centered on ``patch.positive_labels`` voxels
-      - 50% random patches anywhere in the volume
+      - One adaptive 50/50 crop per subject, resampled every ``__getitem__``
 
     Validation / test (``training=False``):
-      - Deterministic center crop of ``patch.size``
+      - ``val_patches_per_subject`` frozen crops per subject (same 50/50 mix)
+      - Centers are seeded by ``splits.seed`` and never change across epochs
     """
 
     def __init__(
@@ -51,7 +53,8 @@ class VoxWhisperDataset(Dataset):
         self.patch_size = tuple(int(x) for x in patch_cfg["size"])
         self.positive_ratio = float(patch_cfg.get("positive_ratio", 0.5))
         self.positive_labels = [int(x) for x in patch_cfg.get("positive_labels", [1])]
-        self.rng = np.random.default_rng()
+        self.val_patches_per_subject = int(patch_cfg.get("val_patches_per_subject", 4))
+        self.rng = np.random.default_rng() if training else None
 
         cache_dir = resolve_path(config, "data.paths.cache")
         cache_file = cache_dir / config["text_encoder"]["cache_file"]
@@ -105,6 +108,14 @@ class VoxWhisperDataset(Dataset):
                 f"but config lists {expected_prompts}"
             )
 
+        self._val_items: Optional[List[Tuple[str, Center]]] = None
+        self._cache_sid: Optional[str] = None
+        self._cache_vols = None
+        if not training:
+            if self.val_patches_per_subject < 1:
+                raise ValueError("data.patch.val_patches_per_subject must be >= 1")
+            self._val_items = self._build_val_items(config)
+
     @staticmethod
     def _load_split_subjects(config: Mapping, split: str) -> list[str]:
         manifest_rel = config["splits"]["manifest"]
@@ -128,6 +139,8 @@ class VoxWhisperDataset(Dataset):
         return list(manifest[split])
 
     def __len__(self):
+        if self._val_items is not None:
+            return len(self._val_items)
         return len(self.subject_ids)
 
     def _load_volume_np(self, subject_id: str, modality: str) -> np.ndarray:
@@ -153,30 +166,7 @@ class VoxWhisperDataset(Dataset):
             )
         return np.rint(data).astype(np.int16)
 
-    def _sample_center(self, labels: np.ndarray) -> Tuple[int, int, int]:
-        """50/50 positive (foreground) vs random center for training patches."""
-        shape = labels.shape
-
-        if self.training and self.rng.random() < self.positive_ratio:
-            pos_mask = np.zeros(shape, dtype=bool)
-            for lab in self.positive_labels:
-                pos_mask |= labels == lab
-            nerve_voxels = np.argwhere(pos_mask)
-            if len(nerve_voxels) > 0:
-                idx = int(self.rng.integers(0, len(nerve_voxels)))
-                z, y, x = nerve_voxels[idx]
-                return (int(z), int(y), int(x))
-            # Fall through to random if no positive voxels
-
-        if self.training:
-            return random_valid_center(shape, self.patch_size, self.rng)
-
-        # Validation / test: deterministic geometric center
-        return volume_center(shape)
-
-    def __getitem__(self, idx):
-        subject_id = self.subject_ids[idx]
-
+    def _load_subject(self, subject_id: str):
         t1_full = self._load_volume_np(subject_id, self.primary)
         t2_full = self._load_volume_np(subject_id, self.secondary)
         if t1_full.shape != t2_full.shape:
@@ -184,9 +174,86 @@ class VoxWhisperDataset(Dataset):
                 f"T1/T2 shape mismatch for {subject_id}: "
                 f"{t1_full.shape} vs {t2_full.shape}"
             )
-
         labels_full = self._load_label_np(subject_id, t1_full.shape)
-        center = self._sample_center(labels_full)
+        return t1_full, t2_full, labels_full
+
+    def _cached_subject(self, subject_id: str):
+        if self._cache_sid != subject_id:
+            self._cache_vols = self._load_subject(subject_id)
+            self._cache_sid = subject_id
+        return self._cache_vols
+
+    def _positive_voxels(self, labels: np.ndarray) -> np.ndarray:
+        pos_mask = np.zeros(labels.shape, dtype=bool)
+        for lab in self.positive_labels:
+            pos_mask |= labels == lab
+        return np.argwhere(pos_mask)
+
+    def _n_positive_patches(self, n_patches: int) -> int:
+        n_pos = int(n_patches * self.positive_ratio)
+        if n_patches > 0 and n_pos == 0 and self.positive_ratio > 0:
+            n_pos = 1
+        return min(n_pos, n_patches)
+
+    def _build_val_items(self, config: Mapping) -> List[Tuple[str, Center]]:
+        seed = int(config.get("splits", {}).get("seed", 42))
+        rng = np.random.default_rng(seed)
+        items: List[Tuple[str, Center]] = []
+        for sid in self.subject_ids:
+            path = mask_path(self.processed_dir, sid)
+            if path.exists():
+                labels, _ = load_nifti(path)
+                labels = np.rint(labels).astype(np.int16)
+            else:
+                t1 = self._load_volume_np(sid, self.primary)
+                labels = np.zeros(t1.shape, dtype=np.int16)
+            for center in self._frozen_centers(labels, rng):
+                items.append((sid, center))
+        return items
+
+    def _frozen_centers(self, labels: np.ndarray, rng: np.random.Generator) -> List[Center]:
+        n_patches = self.val_patches_per_subject
+        n_pos = self._n_positive_patches(n_patches)
+        n_neg = n_patches - n_pos
+        voxels = self._positive_voxels(labels)
+        centers: List[Center] = []
+
+        if n_pos > 0 and len(voxels) > 0:
+            centroid = foreground_centroid(labels, self.positive_labels)
+            assert centroid is not None
+            centers.append(centroid)
+            remaining = n_pos - 1
+            if remaining > 0:
+                replace = remaining > len(voxels)
+                chosen = rng.choice(len(voxels), size=remaining, replace=replace)
+                for i in np.atleast_1d(chosen):
+                    z, y, x = voxels[int(i)]
+                    centers.append((int(z), int(y), int(x)))
+        else:
+            for _ in range(n_pos):
+                centers.append(random_valid_center(labels.shape, self.patch_size, rng))
+
+        for _ in range(n_neg):
+            centers.append(random_valid_center(labels.shape, self.patch_size, rng))
+        return centers
+
+    def _sample_training_center(self, labels: np.ndarray) -> Center:
+        if self.rng.random() < self.positive_ratio:
+            nerve_voxels = self._positive_voxels(labels)
+            if len(nerve_voxels) > 0:
+                idx = int(self.rng.integers(0, len(nerve_voxels)))
+                z, y, x = nerve_voxels[idx]
+                return (int(z), int(y), int(x))
+        return random_valid_center(labels.shape, self.patch_size, self.rng)
+
+    def __getitem__(self, idx):
+        if self.training:
+            subject_id = self.subject_ids[idx]
+            t1_full, t2_full, labels_full = self._load_subject(subject_id)
+            center = self._sample_training_center(labels_full)
+        else:
+            subject_id, center = self._val_items[idx]
+            t1_full, t2_full, labels_full = self._cached_subject(subject_id)
 
         t1_patch = extract_patch_3d(t1_full, center, self.patch_size)
         t2_patch = extract_patch_3d(t2_full, center, self.patch_size)
