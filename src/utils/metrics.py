@@ -11,23 +11,47 @@ class DiceBCELoss(nn.Module):
     def forward(self, pred_logits, target_mask):
         # pred_logits: [B, N_T, D, H, W]
         # target_mask: [B, N_T, D, H, W]
+        B, N_T, D, H, W = pred_logits.shape
         
         # 1. Compute BCE Loss
         bce_loss = self.bce(pred_logits, target_mask)
         
-        # 2. Compute Dice Loss
+        # 2. Compute Dice Loss (FOREGROUND ONLY)
         pred_probs = torch.sigmoid(pred_logits)
-        
-        # Flatten spatial dimensions
-        pred_flat = pred_probs.view(-1)
-        target_flat = target_mask.view(-1)
-        
-        intersection = (pred_flat * target_flat).sum()
-        union = pred_flat.sum() + target_flat.sum()
-        
-        dice_loss = 1.0 - (2.0 * intersection + self.eps) / (union + self.eps)
-        
-        return bce_loss + dice_loss
+        dice_loss = 0.0
+
+        # Number of foreground classes (exclude the background)
+        n_foreground = N_T - 1
+
+        if n_foreground > 0:
+            # we start the range at 1 to completely ignore background channel (c=0)
+            for c in range(1, N_T):
+
+                # Flatten only the spatial dimensions of the current channel
+                pred_flat = pred_probs[:,c].reshape(-1)
+                target_flat = target_mask[:,c].reshape(-1)
+            
+                intersection = (pred_flat * target_flat).sum()
+                union = pred_flat.sum() + target_flat.sum()
+
+                # Compute Dice coefficient for this specific channel
+                channel_dice = (2.0 * intersection + self.eps) / (union + self.eps)
+
+                # Accumulate channel-specific loss 
+                dice_loss += (1.0 - channel_dice)
+
+            # Take the mean of the losses accross all channels
+            avg_dice_loss = dice_loss / n_foreground
+
+        else:
+            pred_flat = pred_probs.reshape(-1)
+            target_flat = target_mask.reshape(-1)
+            intersection = (pred_flat * target_flat).sum()
+            union = pred_flat.sum() + target_flat.sum()
+            avg_dice_loss = 1.0 - (2.0 * intersection + self.eps) / (union + self.eps)
+
+        # Total Loss is the sum of BCE + Channel Averaged Dice
+        return bce_loss + avg_dice_loss
 
 
 def per_class_dice(pred_labels, gt_labels, n_classes, eps=1e-5):
