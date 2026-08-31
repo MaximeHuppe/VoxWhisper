@@ -32,21 +32,21 @@ num_prompts = 3 # ["background", "optic nerve", "optic chiasm"]
 # T1 Structural Input: 128x128x128
 dummy_t1 = torch.rand(batch_size, 1, 128, 128, 128).to(DEVICE)
 
-# Unregistered Diffusion Input: 64x64x64 (Different spatial size)
-dummy_diff = torch.rand(batch_size, 1, 64, 64, 64).to(DEVICE)
+# T2 Structural Input: 128x128x128 (same target grid as T1)
+dummy_t2 = torch.rand(batch_size, 1, 128, 128, 128).to(DEVICE)
 
 # Cached Text Embeddings (e.g. from PubMedBERT)
 dummy_text = torch.rand(batch_size, num_prompts, 768).to(DEVICE)
 
 print(f"-> T1 volume tensor shape:       {dummy_t1.shape}")
-print(f"-> Diffusion volume tensor shape: {dummy_diff.shape}")
+print(f"-> T2 volume tensor shape:       {dummy_t2.shape}")
 print(f"-> Text embeddings tensor shape:  {dummy_text.shape}")
 
 # %%
 # Run the pipeline forward pass
 print("\nExecuting forward pass...")
 with torch.no_grad():
-    predictions = model(dummy_t1, dummy_diff, dummy_text)
+    predictions = model(dummy_t1, dummy_t2, dummy_text)
 
 # %%
 # Verify outputs for Deep Supervision scale consistency

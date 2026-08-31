@@ -1,13 +1,13 @@
-import torch
 import torch.nn as nn
-import torch.nn.functional as F
+
 
 class CrossVolumeAttention(nn.Module):
     """
-    Aligns unregistered Diffusion visual features to the T1 spatial coordinate space.
+    Aligns secondary-modality visual features (e.g. T2 W/O diffusion) to the T1 spatial grid.
     The T1 bottleneck features act as Queries (defining the spatial output grid),
-    while the Diffusion features act as Keys and Values.
+    while the secondary features act as Keys and Values.
     """
+
     def __init__(self, embed_dim=128, num_heads=4):
         super().__init__()
         self.embed_dim = embed_dim
@@ -18,16 +18,16 @@ class CrossVolumeAttention(nn.Module):
         # Normalization and residual scaling
         self.norm = nn.LayerNorm(embed_dim)
 
-    def forward(self, t1_features, diff_features):
-        # t1_features (Query Source):       Shape [B, C, D_t1, H_t1, W_t1]
-        # diff_features (Key/Value Source):  Shape [B, C, D_diff, H_diff, W_diff]
+    def forward(self, t1_features, secondary_features):
+        # t1_features (Query Source):            Shape [B, C, D_t1, H_t1, W_t1]
+        # secondary_features (Key/Value Source): Shape [B, C, D_s, H_s, W_s]
         B, C, D_t1, H_t1, W_t1 = t1_features.shape
-        _, _, D_df, H_df, W_df = diff_features.shape
+        _, _, D_s, H_s, W_s = secondary_features.shape
 
         # 1. Flatten the 3D spatial dimensions of both volumes into sequences of tokens
         # [B, C, D, H, W] -> [B, C, D*H*W] -> [B, D*H*W, C]
         q_tokens = t1_features.view(B, C, D_t1 * H_t1 * W_t1).transpose(1, 2)  # Shape: [B, N_t1, C]
-        kv_tokens = diff_features.view(B, C, D_df * H_df * W_df).transpose(1, 2) # Shape: [B, N_diff, C]
+        kv_tokens = secondary_features.view(B, C, D_s * H_s * W_s).transpose(1, 2)  # Shape: [B, N_s, C]
 
         # 2. Run Cross-Attention
         # Query: T1, Keys/Values: Diffusion
@@ -40,23 +40,21 @@ class CrossVolumeAttention(nn.Module):
         # 4. Reshape back into a 3D spatial grid (matching T1 spatial dimensions)
         # [B, N_t1, C] -> [B, C, N_t1] -> [B, C, D_t1, H_t1, W_t1]
         fused_spatial = fused_tokens.transpose(1, 2).view(B, C, D_t1, H_t1, W_t1)
-
         return fused_spatial
 
 
 class PromptDecoder(nn.Module):
     """
-    Aligns the raw text prompt embeddings to the consolidated multi-modal visual map.
-    The text prompt tokens act as Queries, while the fused T1 + Diffusion visual
-    features act as Keys and Values.
+    Aligns raw text prompt embeddings to the consolidated multi-modal visual map.
+    Text prompt tokens act as Queries; fused T1 + secondary visual features are Keys/Values.
     """
+
     def __init__(self, text_dim=768, embed_dim=128, num_heads=4):
         super().__init__()
         self.embed_dim = embed_dim
         
         # Projects raw text embeddings (e.g. from PubMedBERT) to match visual channel depth
         self.text_projection = nn.Linear(text_dim, embed_dim)
-        
         self.mha = nn.MultiheadAttention(embed_dim, num_heads, batch_first=True)
         self.norm = nn.LayerNorm(embed_dim)
 
@@ -64,7 +62,6 @@ class PromptDecoder(nn.Module):
         # text_embeddings:      Shape [B, N_T, text_dim]  (where N_T is prompt length)
         # fused_visual_features: Shape [B, C, D_t1, H_t1, W_t1] (aligned spatial bottleneck)
         B, C, D_t1, H_t1, W_t1 = fused_visual_features.shape
-        N_T = text_embeddings.shape[1]
 
         # 1. Project the text features to the shared embedding space dimension
         # [B, N_T, text_dim] -> [B, N_T, C]

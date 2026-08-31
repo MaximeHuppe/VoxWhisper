@@ -1,94 +1,184 @@
-# train.py (Updated for real training)
-import os
+# train.py — config-driven VoxWhisper training
+from __future__ import annotations
+
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
-from src.models.vox_whisper import VoxWhisper
 from src.dataset import VoxWhisperDataset
+from src.models.vox_whisper import VoxWhisper
+from src.utils.config import (
+    ensure_dir,
+    load_config,
+    parse_config_args,
+    resolve_path,
+)
 from src.utils.metrics import DiceBCELoss
+from src.utils.splits import create_or_load_splits
 
-def train_model():
-    # 1. Device and Hyperparameters
-    device = torch.device("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")
-    epochs = 150
-    batch_size = 2  # Keep low to prevent VRAM OOM errors
-    learning_rate = 5e-5
-    deep_sup_weights = [0.1, 0.3, 0.6]
 
-    # 2. Instantiate Dataset and DataLoader
-    print("Initializing dataset and dataloader...")
-    train_dataset = VoxWhisperDataset(
-        processed_dir="data/processed",
-        cache_path="cache/prompts_cn2.pt",
-        mask_dir="data/processed"  # Assuming masks are in the same folder
+@torch.no_grad()
+def evaluate(model, loader, criterion, deep_sup_weights, device):
+    """Run a validation pass and return mean deep-supervision loss."""
+    model.eval()
+    total_loss = 0.0
+    n_batches = 0
+
+    for t1_vol, t2_vol, text_emb, gt_mask in loader:
+        t1_vol = t1_vol.to(device)
+        t2_vol = t2_vol.to(device)
+        text_emb = text_emb.to(device)
+        gt_mask = gt_mask.to(device)
+
+        predictions = model(t1_vol, t2_vol, text_emb)
+        batch_loss = 0.0
+        for idx, pred in enumerate(predictions):
+            downsampled_target = F.interpolate(
+                gt_mask,
+                size=pred.shape[2:],
+                mode="trilinear",
+                align_corners=True,
+            )
+            batch_loss = batch_loss + deep_sup_weights[idx] * criterion(
+                pred, downsampled_target
+            )
+
+        total_loss += batch_loss.item()
+        n_batches += 1
+
+    return total_loss / n_batches if n_batches > 0 else 0.0
+
+
+def build_loaders(config):
+    """Create train (and optional val) DataLoaders from config."""
+    train_cfg = config["training"]
+    dl_cfg = train_cfg["dataloader"]
+    splits_cfg = config["splits"]
+
+    common_kwargs = dict(
+        batch_size=train_cfg["batch_size"],
+        num_workers=dl_cfg.get("num_workers", 0),
+        pin_memory=dl_cfg.get("pin_memory", False),
     )
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, drop_last=True)
 
-    # 3. Initialize Model, Loss, Optimizer
-    model = VoxWhisper(input_channels=1, text_dim=768, embed_dim=128).to(device)
+    if splits_cfg.get("enabled", False):
+        splits = create_or_load_splits(config)
+        train_dataset = VoxWhisperDataset(
+            config, subject_ids=splits["train"], training=True
+        )
+        val_dataset = VoxWhisperDataset(
+            config, subject_ids=splits["val"], training=False
+        )
+        train_loader = DataLoader(
+            train_dataset,
+            shuffle=dl_cfg.get("shuffle", True),
+            drop_last=dl_cfg.get("drop_last", True),
+            **common_kwargs,
+        )
+        val_loader = DataLoader(
+            val_dataset,
+            shuffle=False,
+            drop_last=False,
+            **common_kwargs,
+        )
+        return train_loader, val_loader
+
+    train_dataset = VoxWhisperDataset(config, training=True)
+    train_loader = DataLoader(
+        train_dataset,
+        shuffle=dl_cfg.get("shuffle", True),
+        drop_last=dl_cfg.get("drop_last", True),
+        **common_kwargs,
+    )
+    return train_loader, None
+
+
+def train_model(config):
+    device = torch.device(
+        "cuda"
+        if torch.cuda.is_available()
+        else "mps"
+        if torch.backends.mps.is_available()
+        else "cpu"
+    )
+
+    train_cfg = config["training"]
+    epochs = train_cfg["epochs"]
+    learning_rate = train_cfg["learning_rate"]
+    deep_sup_weights = train_cfg["deep_supervision_weights"]
+    checkpoint_every = train_cfg.get("checkpoint_every", 10)
+
+    cache_dir = resolve_path(config, "data.paths.cache")
+    ensure_dir(cache_dir)
+
+    print("Initializing dataset and dataloader...")
+    train_loader, val_loader = build_loaders(config)
+
+    model = VoxWhisper.from_config(config).to(device)
     criterion = DiceBCELoss()
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
-    
-    # Cosine learning rate scheduler with warmup
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
 
     print(f"Starting training on device: {device}...")
     for epoch in range(epochs):
         model.train()
         epoch_loss = 0.0
-        
-        for batch_idx, (t1_vol, diff_vol, text_emb, gt_mask) in enumerate(train_loader):
-            # Move inputs to GPU/CPU
-            t1_vol = t1_vol.to(device)       # [B, 1, 128, 128, 128]
-            diff_vol = diff_vol.to(device)   # [B, 1, 64, 64, 64]
-            text_emb = text_emb.to(device)   # [B, N_T, 768]
-            gt_mask = gt_mask.to(device)     # [B, N_T, 128, 128, 128]
+
+        for t1_vol, t2_vol, text_emb, gt_mask in train_loader:
+            t1_vol = t1_vol.to(device)
+            t2_vol = t2_vol.to(device)
+            text_emb = text_emb.to(device)
+            gt_mask = gt_mask.to(device)
 
             optimizer.zero_grad()
+            predictions = model(t1_vol, t2_vol, text_emb)
 
-            # Forward pass: yields intermediate predictions at 3 scales
-            predictions = model(t1_vol, diff_vol, text_emb)
-
-            # Calculate Multi-Scale Loss (Deep Supervision)
             batch_loss = 0.0
             for idx, pred in enumerate(predictions):
-                target_res = pred.shape[2:] # [32^3], [64^3], [128^3]
-                
-                # Downsample ground truth mask to match the current stage's resolution
                 downsampled_target = F.interpolate(
-                    gt_mask, 
-                    size=target_res, 
-                    mode='trilinear', 
-                    align_corners=True
+                    gt_mask,
+                    size=pred.shape[2:],
+                    mode="trilinear",
+                    align_corners=True,
                 )
-                
                 stage_loss = criterion(pred, downsampled_target)
-                batch_loss += deep_sup_weights[idx] * stage_loss
+                batch_loss = batch_loss + deep_sup_weights[idx] * stage_loss
 
-            # Backward pass and weight update
             batch_loss.backward()
             optimizer.step()
-
             epoch_loss += batch_loss.item()
 
-        # Step the learning rate scheduler
         scheduler.step()
-
-        # Calculate epoch average loss
         avg_loss = epoch_loss / len(train_loader) if len(train_loader) > 0 else epoch_loss
-        print(f"Epoch [{epoch+1}/{epochs}] - Loss: {avg_loss:.4f} - LR: {scheduler.get_last_lr()[0]:.6f}")
 
-        # Save model checkpoint every 10 epochs
-        if (epoch + 1) % 10 == 0:
-            checkpoint_path = f"cache/vox_whisper_epoch_{epoch+1}.pt"
-            torch.save({
-                'epoch': epoch + 1,
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'loss': avg_loss,
-            }, checkpoint_path)
+        log_msg = (
+            f"Epoch [{epoch + 1}/{epochs}] - "
+            f"Train Loss: {avg_loss:.4f} - "
+            f"LR: {scheduler.get_last_lr()[0]:.6f}"
+        )
+
+        if val_loader is not None:
+            val_loss = evaluate(model, val_loader, criterion, deep_sup_weights, device)
+            log_msg += f" - Val Loss: {val_loss:.4f}"
+
+        print(log_msg)
+
+        if (epoch + 1) % checkpoint_every == 0:
+            checkpoint_path = cache_dir / f"vox_whisper_epoch_{epoch + 1}.pt"
+            torch.save(
+                {
+                    "epoch": epoch + 1,
+                    "model_state_dict": model.state_dict(),
+                    "optimizer_state_dict": optimizer.state_dict(),
+                    "loss": avg_loss,
+                    "config": config,
+                },
+                checkpoint_path,
+            )
             print(f"Saved checkpoint to: {checkpoint_path}")
 
+
 if __name__ == "__main__":
-    train_model()
+    args = parse_config_args(description="Train VoxWhisper")
+    cfg = load_config(args.config)
+    train_model(cfg)

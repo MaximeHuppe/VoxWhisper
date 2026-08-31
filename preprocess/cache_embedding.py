@@ -1,17 +1,32 @@
-# preprocess/cache_embeddings.py
-import os
-import torch
-from transformers import AutoTokenizer, AutoModel
+# preprocess/cache_embedding.py
+"""Cache PubMedBERT prompt embeddings using config prompts and paths."""
+from __future__ import annotations
 
-def cache_prompt_embeddings(prompt_list, output_path, model_name="microsoft/BiomedNLP-PubMedBERT-base-uncased-abstract-fulltext"):
+import os
+import sys
+
+import torch
+from transformers import AutoModel, AutoTokenizer
+
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
+from src.utils.config import (  # noqa: E402
+    ensure_dir,
+    load_config,
+    parse_config_args,
+    resolve_path,
+)
+
+
+def cache_prompt_embeddings(prompt_list, output_path, model_name):
     """
-    Passes medical prompts through a frozen clinical language model,
-    pools the token-level embeddings per phrase, and saves them to disk.
+    Pass medical prompts through a frozen clinical language model,
+    pool token-level embeddings per phrase, and save them to disk.
     """
     print(f"Loading tokenizer and model: {model_name}")
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     model = AutoModel.from_pretrained(model_name)
-    
+
     model.eval()
     for param in model.parameters():
         param.requires_grad = False
@@ -19,7 +34,7 @@ def cache_prompt_embeddings(prompt_list, output_path, model_name="microsoft/Biom
     print(f"Tokenizing and encoding prompts: {prompt_list}")
     # We pad and truncate to convert the list of phrases into a clean tensor
     inputs = tokenizer(prompt_list, padding=True, truncation=True, return_tensors="pt")
-    
+
     with torch.no_grad():
         outputs = model(**inputs)
         # outputs.last_hidden_state shape: [Num_Phrases, Seq_Len, 768]
@@ -30,13 +45,18 @@ def cache_prompt_embeddings(prompt_list, output_path, model_name="microsoft/Biom
         # Shape transition: [Num_Phrases, Seq_Len, 768] -> [Num_Phrases, 768]
         embeddings = token_embeddings.mean(dim=1)
 
-    # Save to disk (we keep it as a 2D tensor [Num_Phrases, 768])
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    ensure_dir(output_path.parent)
     torch.save(embeddings, output_path)
     print(f"Cached text embeddings saved to: {output_path} (Final Shape: {embeddings.shape})")
 
+
 if __name__ == "__main__":
-    clinical_prompts = ["background", "optic nerve", "optic chiasm"]
-    target_cache_file = "cache/prompts_cn2.pt"
-    
-    cache_prompt_embeddings(clinical_prompts, target_cache_file)
+    args = parse_config_args(description="Cache clinical prompt embeddings")
+    cfg = load_config(args.config)
+
+    prompts = cfg["data"]["prompts"]
+    model_name = cfg["text_encoder"]["model_name"]
+    cache_dir = resolve_path(cfg, "data.paths.cache")
+    cache_file = cache_dir / cfg["text_encoder"]["cache_file"]
+
+    cache_prompt_embeddings(prompts, cache_file, model_name)
