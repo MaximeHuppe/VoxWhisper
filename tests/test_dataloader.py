@@ -95,10 +95,10 @@ def test_dataloader_batch_shapes():
         dataset = VoxWhisperDataset(cfg, training=True)
         loader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
 
-        t1, t2, text_emb, gt_mask = next(iter(loader))
+        primary, secondary, text_emb, gt_mask = next(iter(loader))
 
-        assert t1.shape == (batch_size, 1, *patch_size)
-        assert t2.shape == (batch_size, 1, *patch_size)
+        assert primary.shape == (batch_size, 1, *patch_size)
+        assert secondary.shape == (batch_size, 1, *patch_size)
         assert text_emb.shape == (batch_size, n_prompts, text_dim)
         assert gt_mask.shape == (batch_size, n_prompts, *patch_size)
 
@@ -114,14 +114,14 @@ def test_model_forward_accepts_dataloader_batch():
         model = VoxWhisper.from_config(cfg)
         model.eval()
 
-        t1, t2, text_emb, _ = next(iter(loader))
+        primary, secondary, text_emb, _ = next(iter(loader))
         with torch.no_grad():
-            predictions = model(t1, t2, text_emb)
+            predictions = model(primary, secondary, text_emb)
 
         assert len(predictions) == 3
         for pred in predictions:
             assert pred.ndim == 5
-            assert pred.shape[0] == t1.shape[0]
+            assert pred.shape[0] == primary.shape[0]
             assert pred.shape[1] == text_emb.shape[1]
 
 
@@ -135,9 +135,9 @@ def test_model_output_spatial_dims_match_deep_supervision():
         model = VoxWhisper.from_config(cfg)
         model.eval()
 
-        t1, t2, text_emb, _ = next(iter(loader))
+        primary, secondary, text_emb, _ = next(iter(loader))
         with torch.no_grad():
-            predictions = model(t1, t2, text_emb)
+            predictions = model(primary, secondary, text_emb)
 
         d, h, w = patch_size
         expected_spatial = [
@@ -163,8 +163,8 @@ def test_training_step_with_dataloader_batch():
         criterion = DiceBCELoss()
         model.train()
 
-        t1, t2, text_emb, gt_mask = next(iter(loader))
-        predictions = model(t1, t2, text_emb)
+        primary, secondary, text_emb, gt_mask = next(iter(loader))
+        predictions = model(primary, secondary, text_emb)
 
         batch_loss = 0.0
         for idx, pred in enumerate(predictions):
@@ -190,9 +190,9 @@ def test_validation_uses_frozen_patches_per_subject():
 
         epoch_a = [dataset[i] for i in range(len(dataset))]
         epoch_b = [dataset[i] for i in range(len(dataset))]
-        for (t1_a, t2_a, _, gt_a), (t1_b, t2_b, _, gt_b) in zip(epoch_a, epoch_b):
-            torch.testing.assert_close(t1_a, t1_b)
-            torch.testing.assert_close(t2_a, t2_b)
+        for (p_a, s_a, _, gt_a), (p_b, s_b, _, gt_b) in zip(epoch_a, epoch_b):
+            torch.testing.assert_close(p_a, p_b)
+            torch.testing.assert_close(s_a, s_b)
             torch.testing.assert_close(gt_a, gt_b)
 
         other = VoxWhisperDataset(cfg, training=False)
