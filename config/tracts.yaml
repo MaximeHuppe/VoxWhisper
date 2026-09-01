@@ -1,0 +1,90 @@
+# tracts.yaml — white-matter tract segmentation (6 structures)
+
+data:
+  paths:
+    raw: data/raw
+    processed: data/processed
+    cache: cache
+
+  modalities:
+    primary: t1
+    secondary: t2
+
+  volumes:
+    t1:
+      filename: T1w_acpc_dc_restore.nii.gz
+    t2:
+      filename: T2w_acpc_dc_restore.nii.gz
+
+  masks:
+    source: tract_masks_1.25
+    structures: config/structures.json
+
+  patch:
+    size: [128, 128, 128]
+    positive_ratio: 0.5
+    val_patches_per_subject: 4
+
+  mock_volume_shape: [192, 192, 192]
+
+preprocessing:
+  normalization: zscore
+  zscore_nonzero_only: true
+
+text_encoder:
+  model_name: microsoft/BiomedNLP-PubMedBERT-base-uncased-abstract-fulltext
+  cache_file: prompts_tracts.pt
+
+model:
+  input_channels: 1          # primary encoder
+  secondary_encoder:
+    input_channels: 1        # falls back to model.input_channels if omitted
+
+  text_dim: 768
+  embed_dim: 128
+  num_heads: 4
+  encoder:
+    channels: [16, 32, 64, 128]
+    strides: [2, 2, 2]
+    kernel_sizes: [3, 3, 3]
+    paddings: [1, 1, 1]
+    num_resblocks: [1, 1, 1]
+  
+training:
+  seed: 42
+  batch_size: 2
+  epochs: 150
+  learning_rate: 0.00005
+  deep_supervision_weights: [0.1, 0.3, 0.6]
+  checkpoint:
+    monitor: dice          # loss | dice
+    dice_scope: patch      # patch | volume (only if monitor=dice)
+    keep: 3                # top-k by monitor (highest dice / lowest loss)
+    every: 10              # write vox_whisper_epoch_N.pt every N epochs
+    volume_every: 10       # full-volume Dice every N epochs (dice_scope=volume)
+    keep_periodic: true
+  dataloader:
+    shuffle: true
+    drop_last: true
+    num_workers: 8
+    pin_memory: true
+
+splits:
+  enabled: true
+  train_ratio: 0.8
+  val_ratio: 0.1
+  test_ratio: 0.1
+  seed: 42
+  manifest: data/splits.json
+
+inference:
+  overlap: 0.5
+  mode: gaussian
+  sigma_scale: 0.125
+  sw_batch_size: 2
+  split: test
+  output_dir: data/predictions
+  checkpoint: null
+  threshold: 0.5
+  save_probabilities: false
+  progress: true

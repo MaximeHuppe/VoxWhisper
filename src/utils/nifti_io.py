@@ -10,86 +10,9 @@ import numpy as np
 PathLike = Union[str, Path]
 
 
-def center_crop_or_pad_3d(
-    volume: np.ndarray,
-    target_shape: Sequence[int] = (128, 128, 128),
-) -> Tuple[np.ndarray, Tuple[int, int, int]]:
-    """
-    Center crop or pad a 3D array to ``target_shape``.
-
-    Returns
-    -------
-    output : np.ndarray
-        Cropped/padded volume.
-    offset : (oz, oy, ox)
-        Voxel offset of the output origin in the *input* grid
-        (negative when padding). Used to update NIfTI affines.
-    """
-    spatial_shape = volume.shape
-    target_shape = tuple(int(x) for x in target_shape)
-    output = np.zeros(target_shape, dtype=volume.dtype)
-
-    slices_in = []
-    slices_out = []
-    offset = []
-
-    for i in range(3):
-        if spatial_shape[i] >= target_shape[i]:
-            start = (spatial_shape[i] - target_shape[i]) // 2
-            slices_in.append(slice(start, start + target_shape[i]))
-            slices_out.append(slice(0, target_shape[i]))
-            offset.append(start)
-        else:
-            start = (target_shape[i] - spatial_shape[i]) // 2
-            slices_in.append(slice(0, spatial_shape[i]))
-            slices_out.append(slice(start, start + spatial_shape[i]))
-            offset.append(-start)
-
-    output[tuple(slices_out)] = volume[tuple(slices_in)]
-    return output, (offset[0], offset[1], offset[2])
-
-
-def adjust_affine_for_crop(
-    affine: np.ndarray,
-    offset: Tuple[int, int, int],
-) -> np.ndarray:
-    """Shift affine origin so cropped voxels keep world coordinates."""
-    new_affine = affine.copy()
-    voxel_offset = np.array(offset, dtype=np.float64)
-    new_affine[:3, 3] = affine[:3, 3] + affine[:3, :3] @ voxel_offset
-    return new_affine
-
-
-def identity_affine(spacing: Sequence[float] = (1.0, 1.0, 1.0)) -> np.ndarray:
-    """Simple RAS-like identity affine with given voxel spacing."""
-    affine = np.eye(4, dtype=np.float64)
-    for i, s in enumerate(spacing):
-        affine[i, i] = float(s)
-    return affine
-
-
-def save_nifti(
-    data: np.ndarray,
-    path: PathLike,
-    affine: Optional[np.ndarray] = None,
-    dtype: Optional[np.dtype] = None,
-) -> Path:
-    """
-    Save a NumPy array as ``.nii.gz``.
-
-    ``data`` may be 3D ``(D, H, W)`` or 4D ``(D, H, W, C)``.
-    """
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if affine is None:
-        affine = identity_affine()
-    arr = np.asarray(data)
-    if dtype is not None:
-        arr = arr.astype(dtype, copy=False)
-    img = nib.Nifti1Image(arr, affine)
-    nib.save(img, str(path))
-    return path
-
+########################################################
+#          VOLUME I/O AND PROCESSING HELPERS          #
+########################################################
 
 def load_nifti(path: PathLike) -> Tuple[np.ndarray, np.ndarray]:
     """Load a NIfTI file; returns ``(data, affine)`` as float32 data."""
@@ -142,22 +65,110 @@ def normalize_intensity(
     raise ValueError(f"Unknown normalization method: {method}")
 
 
+def save_nifti(
+    data: np.ndarray,
+    path: PathLike,
+    affine: Optional[np.ndarray] = None,
+    dtype: Optional[np.dtype] = None,
+) -> Path:
+    """
+    Save a NumPy array as ``.nii.gz``.
+
+    ``data`` may be 3D ``(D, H, W)`` or 4D ``(D, H, W, C)``.
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if affine is None:
+        affine = identity_affine()
+    arr = np.asarray(data)
+    if dtype is not None:
+        arr = arr.astype(dtype, copy=False)
+    img = nib.Nifti1Image(arr, affine)
+    nib.save(img, str(path))
+    return path
+
+
+def identity_affine(spacing: Sequence[float] = (1.0, 1.0, 1.0)) -> np.ndarray:
+    """Simple RAS-like identity affine with given voxel spacing."""
+    affine = np.eye(4, dtype=np.float64)
+    for i, s in enumerate(spacing):
+        affine[i, i] = float(s)
+    return affine
+
+
 def label_to_multichannel(label_volume: np.ndarray, n_channels: int) -> np.ndarray:
     """Integer label map → float multi-channel one-hot ``[N_T, D, H, W]``."""
     channels = [(label_volume == k).astype(np.float32) for k in range(n_channels)]
     return np.stack(channels, axis=0)
 
 
+########################################################
+#          SUBJECT PROCESSING AND PATH HELPERS         #
+########################################################
+
 def subject_processed_dir(processed_root: PathLike, subject_id: str) -> Path:
+    """Get the processed directory for a given subject."""
     return Path(processed_root) / subject_id
 
-
 def volume_path(processed_root: PathLike, subject_id: str, modality: str) -> Path:
+    """Get the volume path for a given subject and modality."""
     return subject_processed_dir(processed_root, subject_id) / f"{modality}.nii.gz"
 
 
 def mask_path(processed_root: PathLike, subject_id: str) -> Path:
+    """Get the mask path for a given subject."""
     return subject_processed_dir(processed_root, subject_id) / "mask.nii.gz"
+
+
+def resolve_raw_volume_path(
+    raw_dir: PathLike,
+    subject_id: str,
+    filename: str,
+) -> Optional[Path]:
+    """
+    Resolve a raw volume path for a given subject and filename.
+    
+    Steps:
+    1. Get the root directory
+    2. Check if the candidate paths exist
+    3. Return the first existing path
+    """
+    root = Path(raw_dir) / subject_id
+    for candidate in (root / "T1w" / filename, root / filename):
+        if candidate.exists():
+            return candidate
+    return None
+
+
+########################################################
+#          SUBJECT LISTING FUNCTIONS                   #
+########################################################
+
+def list_subject_ids(processed_root: PathLike) -> list[str]:
+    """
+    List subject IDs under processed root.
+
+    Supports:
+    - New layout: ``{processed}/{subject_id}/t1.nii.gz``
+    - Legacy NPZ: ``{processed}/{subject_id}_preprocessed.npz``
+    """
+    root = Path(processed_root)
+    if not root.exists():
+        return []
+
+    subjects = set()
+    for child in root.iterdir():
+        if child.is_dir():
+            if any(child.glob("*.nii.gz")) or any(child.glob("*.nii")):
+                subjects.add(child.name)
+        elif child.name.endswith("_preprocessed.npz"):
+            subjects.add(child.name.split("_")[0])
+    return sorted(subjects)
+
+
+########################################################
+#          PATCH EXTRACTION AND CENTER SAMPLING        #
+########################################################
 
 
 def extract_patch_3d(
@@ -182,15 +193,25 @@ def extract_patch_3d(
     patch : np.ndarray
         Array of shape ``patch_size`` (same dtype as ``volume``).
     """
+
+    # 1. Check if the volume is 3D
     if volume.ndim != 3:
         raise ValueError(f"extract_patch_3d expects 3D volume, got shape {volume.shape}")
 
+    # 2. Convert the patch size to integers
     patch_size = tuple(int(x) for x in patch_size)
+
+    # 3. Convert the center to integers
     center = [int(c) for c in center]
+
+    # 4. Create an output array of the same shape as the patch size
     output = np.zeros(patch_size, dtype=volume.dtype)
 
+    # 5. Create source and destination slices
     src_slices = []
     dst_slices = []
+
+    # 6. For each axis, calculate the source and destination slices
     for i in range(3):
         half = patch_size[i] // 2
         src_start = center[i] - half
@@ -204,9 +225,11 @@ def extract_patch_3d(
         src_slices.append(slice(src_start_clipped, src_end_clipped))
         dst_slices.append(slice(dst_start, dst_end))
 
+    # 7. Check if the source and destination slices are valid
     if all(s.start < s.stop for s in src_slices) and all(
         s.start < s.stop for s in dst_slices
     ):
+        # 8. Extract the patch from the volume
         output[tuple(dst_slices)] = volume[tuple(src_slices)]
     return output
 
@@ -221,7 +244,15 @@ def random_valid_center(
 
     If the volume is smaller than the patch along an axis, the center is clamped
     to the middle of that axis (patch will be padded).
+
+    Steps:
+    1. For each axis, calculate the half size
+    2. Calculate the lower and upper bounds
+    3. If the upper bound is less than or equal to the lower bound, set the center to the middle of the axis
+    4. Otherwise, sample a random integer between the lower and upper bounds
+    5. Return the center
     """
+
     center = []
     for i in range(3):
         half = int(patch_size[i]) // 2
@@ -234,41 +265,5 @@ def random_valid_center(
     return (center[0], center[1], center[2])
 
 
-def foreground_centroid(
-    labels: np.ndarray,
-    positive_labels: Sequence[int],
-) -> Optional[Tuple[int, int, int]]:
-    """
-    Integer-rounded centroid of voxels whose label is in ``positive_labels``.
-
-    Returns ``None`` when no matching voxels exist.
-    """
-    pos_mask = np.zeros(labels.shape, dtype=bool)
-    for lab in positive_labels:
-        pos_mask |= labels == lab
-    voxels = np.argwhere(pos_mask)
-    if len(voxels) == 0:
-        return None
-    return tuple(int(round(c)) for c in voxels.mean(axis=0))
 
 
-def list_subject_ids(processed_root: PathLike) -> list[str]:
-    """
-    List subject IDs under processed root.
-
-    Supports:
-    - New layout: ``{processed}/{subject_id}/t1.nii.gz``
-    - Legacy NPZ: ``{processed}/{subject_id}_preprocessed.npz``
-    """
-    root = Path(processed_root)
-    if not root.exists():
-        return []
-
-    subjects = set()
-    for child in root.iterdir():
-        if child.is_dir():
-            if any(child.glob("*.nii.gz")) or any(child.glob("*.nii")):
-                subjects.add(child.name)
-        elif child.name.endswith("_preprocessed.npz"):
-            subjects.add(child.name.split("_")[0])
-    return sorted(subjects)

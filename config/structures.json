@@ -1,0 +1,9 @@
+{
+    "background": { "label": 0, "prompt": "background" },
+    "ATR_left":  { "label": 1, "prompt": "left anterior thalamic radiation" },
+    "ATR_right": { "label": 2, "prompt": "right anterior thalamic radiation" },
+    "CG_left":   { "label": 3, "prompt": "left cingulum" },
+    "CG_right":  { "label": 4, "prompt": "right cingulum" },
+    "UF_left":   { "label": 5, "prompt": "left uncinate fasciculus" },
+    "UF_right":  { "label": 6, "prompt": "right uncinate fasciculus" }
+  }

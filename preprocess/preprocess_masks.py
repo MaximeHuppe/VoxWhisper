@@ -1,5 +1,5 @@
 # preprocess/preprocess_masks.py
-"""Resample OpticNerveSeg labels onto the full T1 grid (no patch crop)."""
+"""Build integer label maps on the T1 grid (tract merge or legacy single-mask)."""
 from __future__ import annotations
 
 import os
@@ -14,63 +14,100 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 from src.utils.config import (  # noqa: E402
     ensure_dir,
     load_config,
+    load_structures,
     parse_config_args,
     resolve_path,
 )
 from src.utils.nifti_io import (  # noqa: E402
     mask_path,
+    resolve_raw_volume_path,
     save_nifti,
     subject_processed_dir,
 )
 
 
+########################################################
+#                PATH UTILITY FUNCTIONS                #
+########################################################
+
 def find_mask_path(mask_dir, subject_id, filename_template):
     filename = filename_template.format(subject_id=subject_id)
-    candidate = os.path.join(mask_dir, subject_id, filename)
-    if os.path.exists(candidate):
-        return candidate
-
-    flat = os.path.join(mask_dir, filename)
-    if os.path.exists(flat):
-        return flat
+    for candidate in (
+        os.path.join(mask_dir, subject_id, filename),
+        os.path.join(mask_dir, filename),
+    ):
+        if os.path.exists(candidate):
+            return candidate
     return None
 
 
-def resolve_reference_t1(raw_dir, subject_id, t1_cfg):
-    """Locate the T1 volume used as the resampling reference grid."""
-    primary = os.path.join(raw_dir, subject_id, "T1w", t1_cfg["filename"])
-    if os.path.exists(primary):
-        return primary
-    return None
+########################################################
+#                MASK PROCESSING FUNCTIONS             #
+########################################################
 
 
-def process_subject_mask(subject_id, mask_dir, raw_dir, output_dir, config):
-    print(f"Processing mask: {subject_id}")
+def process_mask(subject_id, raw_dir, output_dir, config, structures):
+    """
+    Process tract masks for a given subject.
+    
+    Steps:
+    1. Load T1 reference volume
+    2. Load tract masks
+    3. Resample tract masks to T1 reference volume (order=0)
+    4. Create integer label map
+    5. Save label map
+    """
 
-    mask_cfg = config["data"]["masks"]
+    print(f"Processing tract masks: {subject_id}")
+
+    # 1. Load T1 reference volume
     t1_cfg = config["data"]["volumes"]["t1"]
-
-    src_mask = find_mask_path(mask_dir, subject_id, mask_cfg["filename"])
-    if src_mask is None:
-        print(f"Warning: mask missing for {subject_id}. Skipping.")
-        return
-
-    t1_path = resolve_reference_t1(raw_dir, subject_id, t1_cfg)
+    t1_path = resolve_raw_volume_path(raw_dir, subject_id, t1_cfg["filename"])
     if t1_path is None:
-        print(f"Warning: T1 reference missing for {subject_id}. Skipping mask.")
+        print(f"Warning: T1 reference missing for {subject_id}. Skipping.")
         return
 
-    label_img = nib.load(src_mask)
-    t1_img = nib.load(t1_path)
+    t1_img = nib.load(str(t1_path))
 
-    # Resample integer labels onto the full T1 grid (nearest-neighbor)
-    resampled = resample_from_to(label_img, t1_img, order=0)
-    label_data = np.rint(resampled.get_fdata()).astype(np.uint8)
+    # 2. Create integer label map
+    label_data = np.zeros(t1_img.shape[:3], dtype=np.uint8)
 
+    # 3. Get the mask folder path (for the given subject)
+    mask_dir = os.path.join(raw_dir, subject_id, config["data"]["masks"]["source"])
+
+    # 4. Process each mask
+    for name, label_val in structures["foreground"]:
+
+        # 4.1. Get the mask path
+        src = os.path.join(mask_dir, f"{name}.nii.gz")
+        if not os.path.exists(src):
+            print(f"  Warning: missing {name}")
+            continue
+
+        # 4.2. Resample the mask to the T1 reference volume
+        resampled = resample_from_to(nib.load(src), t1_img, order=0)
+
+        # 4.3. Create binary mask
+        binary = resampled.get_fdata() > 0
+
+        # 4.4. Check for overlapping voxels
+        overlap = binary & (label_data > 0)
+        if overlap.any():
+            print(f"  Warning: {int(overlap.sum())} overlapping voxels for {name}")
+
+        # 4.5. Update the label map
+        label_data[binary] = label_val
+
+    if not np.any(label_data):
+        print(f"Warning: no tract masks found for {subject_id}. Skipping.")
+        return
+
+    # 5. Save the label map
     ensure_dir(subject_processed_dir(output_dir, subject_id))
     out_file = mask_path(output_dir, subject_id)
     save_nifti(label_data, out_file, affine=t1_img.affine, dtype=np.uint8)
 
+    # 6. Print the label map statistics
     uniq, counts = np.unique(label_data, return_counts=True)
     print(
         f"  Saved: {out_file} shape={label_data.shape} "
@@ -79,33 +116,42 @@ def process_subject_mask(subject_id, mask_dir, raw_dir, output_dir, config):
 
 
 def preprocess_masks(config):
-    mask_dir = resolve_path(config, "data.paths.raw_masks")
+    """
+    Preprocess all masks for all subjects.
+    
+    Steps:
+    1. Resolve the raw and output directories
+    2. Load the structures
+    3. Check if the raw directory exists
+    4. Get the list of subjects
+    5. Print the number of subjects
+    6. Process each subject
+    """
+
+    # 1. Resolve the raw and output directories
     raw_dir = resolve_path(config, "data.paths.raw")
     output_dir = resolve_path(config, "data.paths.processed")
     ensure_dir(output_dir)
 
-    if not mask_dir.exists():
-        print(f"Error: mask directory not found: {mask_dir}")
+    # 2. Load the structures
+    structures = load_structures(config)
+
+    # 3. Check if the raw directory exists
+    if not raw_dir.exists():
+        print(f"Error: raw data directory not found: {raw_dir}")
         sys.exit(1)
 
-    if raw_dir.exists():
-        subjects = sorted(
-            d
-            for d in os.listdir(raw_dir)
-            if os.path.isdir(os.path.join(raw_dir, d))
-        )
-    else:
-        subjects = sorted(
-            d
-            for d in os.listdir(mask_dir)
-            if os.path.isdir(os.path.join(mask_dir, d))
-        )
+    # 4. Get the list of subjects
+    subjects = sorted(
+        d for d in os.listdir(raw_dir) if os.path.isdir(os.path.join(raw_dir, d))
+    )
 
+    # 5. Process each subject
     print(f"Processing masks for {len(subjects)} subjects (full T1 resolution)")
     for subject_id in subjects:
-        process_subject_mask(
-            subject_id, str(mask_dir), str(raw_dir), output_dir, config
-        )
+            process_mask(
+                subject_id, str(raw_dir), output_dir, config, structures
+            )
 
 
 if __name__ == "__main__":

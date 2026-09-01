@@ -18,23 +18,38 @@ from src.utils.config import (  # noqa: E402
 )
 
 
-def cache_prompt_embeddings(prompt_list, output_path, model_name):
+def cache_embedding(prompt_list, output_path, model_name):
     """
-    Pass medical prompts through a frozen clinical language model,
-    pool token-level embeddings per phrase, and save them to disk.
+    Cache PubMedBERT prompt embeddings using config prompts and paths.
+
+    Steps:
+    1. Load the tokenizer and model
+    2. Set the model to evaluation mode
+    3. Freeze the model parameters
+    4. Tokenize and encode the prompts
+    5. Compute the token-level embeddings and mean pool them
+    6. Save the embeddings to disk
     """
+
+    # 1. Load the tokenizer and model
     print(f"Loading tokenizer and model: {model_name}")
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     model = AutoModel.from_pretrained(model_name)
 
+    # 2. Set the model to evaluation mode
     model.eval()
+
+    # 3. Freeze the model parameters
     for param in model.parameters():
         param.requires_grad = False
 
     print(f"Tokenizing and encoding prompts: {prompt_list}")
+
+    # 4. Tokenize and encode the prompts
     # We pad and truncate to convert the list of phrases into a clean tensor
     inputs = tokenizer(prompt_list, padding=True, truncation=True, return_tensors="pt")
 
+    # 5. Compute the token-level embeddings and mean pool them
     with torch.no_grad():
         outputs = model(**inputs)
         # outputs.last_hidden_state shape: [Num_Phrases, Seq_Len, 768]
@@ -45,6 +60,7 @@ def cache_prompt_embeddings(prompt_list, output_path, model_name):
         # Shape transition: [Num_Phrases, Seq_Len, 768] -> [Num_Phrases, 768]
         embeddings = token_embeddings.mean(dim=1)
 
+    # 6. Save the embeddings to disk
     ensure_dir(output_path.parent)
     torch.save(embeddings, output_path)
     print(f"Cached text embeddings saved to: {output_path} (Final Shape: {embeddings.shape})")
@@ -59,4 +75,4 @@ if __name__ == "__main__":
     cache_dir = resolve_path(cfg, "data.paths.cache")
     cache_file = cache_dir / cfg["text_encoder"]["cache_file"]
 
-    cache_prompt_embeddings(prompts, cache_file, model_name)
+    cache_embedding(prompts, cache_file, model_name)
