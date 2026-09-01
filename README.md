@@ -17,7 +17,7 @@ From the repo root (with the project env activated):
 
 ```bash
 # 1. Offline data prep (volumes → masks → PubMedBERT prompt cache)
-python pipeline/preprocess.py --config config/tracts.yaml
+python pipeline/run_preprocess.py --config config/tracts.yaml
 
 # 2. Train
 python pipeline/train.py --config config/tracts.yaml

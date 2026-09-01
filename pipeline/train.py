@@ -109,7 +109,7 @@ def train_model(config):
     learning_rate = train_cfg["learning_rate"]
     deep_sup_weights = train_cfg["deep_supervision_weights"]
 
-    cache_dir = resolve_path(config, "data.paths.cache")
+    cache_dir = resolve_path(config, "data.paths.checkpoints")
     ensure_dir(cache_dir)
 
     print(f"Training seed: {seed}")

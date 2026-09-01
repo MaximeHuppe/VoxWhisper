@@ -120,6 +120,35 @@ def mask_path(processed_root: PathLike, subject_id: str) -> Path:
     return subject_processed_dir(processed_root, subject_id) / "mask.nii.gz"
 
 
+def required_processed_paths(
+    processed_root: PathLike,
+    subject_id: str,
+    primary: str,
+    secondary: str,
+) -> dict[str, Path]:
+    """Primary volume, secondary volume, and integer mask for one subject."""
+    return {
+        primary: volume_path(processed_root, subject_id, primary),
+        secondary: volume_path(processed_root, subject_id, secondary),
+        "mask": mask_path(processed_root, subject_id),
+    }
+
+
+def subject_is_complete(
+    processed_root: PathLike,
+    subject_id: str,
+    primary: str,
+    secondary: str,
+) -> bool:
+    """True when both modalities and the mask exist as files."""
+    return all(
+        path.is_file()
+        for path in required_processed_paths(
+            processed_root, subject_id, primary, secondary
+        ).values()
+    )
+
+
 def resolve_raw_volume_path(
     raw_dir: PathLike,
     subject_id: str,

@@ -7,14 +7,15 @@ Thin CLIs that wire [`../src/`](../src/README.md) and [`../preprocess/`](../prep
 ### Preprocess
 
 ```bash
-python pipeline/preprocess.py --config config/tracts.yaml
+python pipeline/run_preprocess.py --config config/tracts.yaml
 ```
 
 Runs in order:
 
 1. `preprocess_volumes` — normalized full-res primary/secondary NIfTIs
 2. `preprocess_masks` — integer `mask.nii.gz` on the T1 grid
-3. `cache_embedding` — PubMedBERT prompt tensor under `data.paths.cache`
+3. Drop processed subject folders missing primary, secondary, or `mask.nii.gz`
+4. `cache_embedding` — PubMedBERT prompt tensor under `data.paths.cache`
 
 Does **not** download HCP data; use `preprocess/extract_hcp.py` separately if needed.
 
@@ -64,7 +65,7 @@ Sliding-window settings (`overlap`, `mode`, `sigma_scale`, `sw_batch_size`, …)
 ## Typical flow
 
 ```
-pipeline/preprocess.py  →  data/processed + cache/prompts_*.pt
+pipeline/run_preprocess.py  →  data/processed + cache/prompts_*.pt
 pipeline/train.py       →  cache/vox_whisper_*.pt
 pipeline/evaluate.py    →  data/predictions/{sid}/pred_labels.nii.gz
 ```

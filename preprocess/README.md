@@ -3,7 +3,7 @@
 Turn HCP-style raw volumes and tract masks into full-resolution processed subjects plus a cached prompt embedding tensor. Prefer the orchestrator:
 
 ```bash
-python pipeline/preprocess.py --config config/tracts.yaml
+python pipeline/run_preprocess.py --config config/tracts.yaml
 ```
 
 which runs volumes → masks → embeddings in order. Individual scripts below are the same steps.
@@ -33,7 +33,7 @@ Downloads structural volumes from an S3 HCP-style bucket for subjects that alrea
 - `data.download.bucket`, `dataset_prefix`
 - optional `data.download.modalities`, `limit_subjects`, `limit_count`
 
-This is not part of `pipeline/preprocess.py`. Documented so you do not expect a one-line toggle in the default config.
+This is not part of `pipeline/run_preprocess.py`. Documented so you do not expect a one-line toggle in the default config.
 
 ### `preprocess_volumes.py`
 

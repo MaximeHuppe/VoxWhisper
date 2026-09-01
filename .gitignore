@@ -4,13 +4,13 @@
 # Exclude raw clinical scans and processed NumPy patches
 data/raw/
 data/raw_masks/
-data/processed/
+data/processed_*/
 data/predictions/
 output/
 trained_models/
 
 # Exclude pre-computed text embeddings and trained model checkpoints
-cache/*.pt
+cache/*/*.pt
 cache/*.npy
 cache/*.npz
 
