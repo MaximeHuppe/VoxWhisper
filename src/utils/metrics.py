@@ -1,6 +1,11 @@
 # src/utils/metrics.py
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
+
+########################################################
+#               DICE BCE LOSS FUNCTION                 #
+########################################################
 
 class DiceBCELoss(nn.Module):
     def __init__(self, eps=1e-5):
@@ -54,6 +59,24 @@ class DiceBCELoss(nn.Module):
         return bce_loss + avg_dice_loss
 
 
+def deep_supervision_loss(predictions, target, criterion, weights):
+    """Weighted DiceBCE across decoder stages (target is interpolated per stage)."""
+    loss = 0.0
+    for idx, pred in enumerate(predictions):
+        downsampled = F.interpolate(
+            target,
+            size=pred.shape[2:],
+            mode="trilinear",
+            align_corners=True,
+        )
+        loss = loss + weights[idx] * criterion(pred, downsampled)
+    return loss
+
+
+########################################################
+#               PER CLASS DICE SCORE METRICS           #
+########################################################
+
 def per_class_dice(pred_labels, gt_labels, n_classes, eps=1e-5):
     """
     Integer label maps → one Dice score per class.
@@ -99,3 +122,12 @@ def channel_dice_from_logits(logits, target, threshold=0.5, eps=1e-5):
         else:
             scores.append(float((2.0 * intersection + eps) / (denom + eps)))
     return scores
+
+
+def foreground_channel_dice(logits, target, threshold=0.5, eps=1e-5):
+    """Mean Dice over non-background prompt channels (class 0 is ignored)."""
+    scores = channel_dice_from_logits(logits, target, threshold=threshold, eps=eps)
+    foreground = scores[1:] if len(scores) > 1 else scores
+    if not foreground:
+        return 1.0
+    return sum(foreground) / len(foreground)

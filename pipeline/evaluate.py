@@ -15,6 +15,7 @@ from src.infer import (
     volumes_to_tensors,
 )
 from src.models.vox_whisper import VoxWhisper
+from src.utils.checkpoint import load_model_state
 from src.utils.config import (
     ensure_dir,
     get_project_root,
@@ -33,7 +34,7 @@ def parse_args():
     parser.add_argument(
         "--config",
         type=str,
-        default="config/default.yaml",
+        default="config/tracts.yaml",
         help="Path to YAML config (relative to project root or absolute)",
     )
     parser.add_argument(
@@ -81,11 +82,17 @@ def resolve_checkpoint(config, explicit: str | None) -> Path:
         return path
 
     cache_dir = resolve_path(config, "data.paths.cache")
+    for name in ("vox_whisper_best.pt", "vox_whisper_top1.pt"):
+        preferred = cache_dir / name
+        if preferred.exists():
+            return preferred
+
     ckpts = list(cache_dir.glob("vox_whisper_epoch_*.pt"))
     if not ckpts:
         raise FileNotFoundError(
             f"No checkpoint given and none found in {cache_dir} "
-            "(expected vox_whisper_epoch_*.pt). Train first or pass --checkpoint."
+            "(expected vox_whisper_best.pt or vox_whisper_epoch_*.pt). "
+            "Train first or pass --checkpoint."
         )
     return max(ckpts, key=_checkpoint_epoch)
 
@@ -133,7 +140,7 @@ def load_model(config, checkpoint_path: Path, device: torch.device) -> VoxWhispe
     except TypeError:
         ckpt = torch.load(checkpoint_path, map_location=device)
     state = ckpt["model_state_dict"] if isinstance(ckpt, dict) and "model_state_dict" in ckpt else ckpt
-    model.load_state_dict(state)
+    load_model_state(model, state)
     model.eval()
     return model
 
@@ -160,16 +167,18 @@ def evaluate_subject(
     n_prompts = len(prompts)
     threshold = float(inf_cfg.get("threshold", 0.5))
 
-    t1_np, t2_np, labels_np, affine = load_subject_for_inference(config, subject_id)
-    t1, t2 = volumes_to_tensors(t1_np, t2_np)
-    t1 = t1.to(device)
-    t2 = t2.to(device)
+    primary_np, secondary_np, labels_np, affine = load_subject_for_inference(
+        config, subject_id
+    )
+    primary, secondary = volumes_to_tensors(primary_np, secondary_np)
+    primary = primary.to(device)
+    secondary = secondary.to(device)
 
     with torch.no_grad():
         logits = predict_full_volume(
             model,
-            t1,
-            t2,
+            primary,
+            secondary,
             text_embeddings.to(device),
             roi_size=patch_size,
             sw_batch_size=int(inf_cfg.get("sw_batch_size", 2)),
@@ -178,11 +187,6 @@ def evaluate_subject(
             sigma_scale=float(inf_cfg.get("sigma_scale", 0.125)),
             progress=bool(inf_cfg.get("progress", True)),
         )
-
-        print("logit shape:", tuple(logits.shape))
-        print("background logit mean:", logits[0, 0].mean().item(), "max", logits[0, 0].max().item(), "min", logits[0, 0].min().item())
-        print("optic nerve logit mean:", logits[0, 1].mean().item(), "max", logits[0, 1].max().item(), "min", logits[0, 1].min().item())
-        print("frac argmax==background:", (logits.argmax(dim=1) == 0).float().mean().item())
 
     pred_labels = logits_to_label_map(logits)[0].cpu()
     subject_dir = ensure_dir(output_dir / subject_id)
