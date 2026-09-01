@@ -3,98 +3,103 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
+def bottleneck_spatial_size(patch_size, strides):
+    """Spatial size after successive encoder downsamples: patch / product(strides)."""
+    size = [int(x) for x in patch_size]
+    if len(size) != 3:
+        raise ValueError(f"patch_size must be length 3, got {patch_size}")
+    for stride in strides:
+        step = int(stride[0] if isinstance(stride, (list, tuple)) else stride)
+        if step < 1:
+            raise ValueError(f"stride must be >= 1, got {stride}")
+        size = [dim // step for dim in size]
+        if any(dim < 1 for dim in size):
+            raise ValueError(
+                f"Bottleneck collapsed to {tuple(size)} from patch {tuple(int(x) for x in patch_size)} "
+                f"and strides {list(strides)}"
+            )
+    return tuple(size)
+
+
 class PositionalEncoding3D(nn.Module):
     """
     Generate learned 3D positional embeddings for a spatial grid.
     Uses broadcasting to create a unified coordinate grid from 3 parameter axes.
+    Interpolates to the runtime spatial size when it differs from the learned grid.
     """
 
     def __init__(self, embed_dim=128, d_size=16, h_size=16, w_size=16):
         super().__init__()
         self.embed_dim = embed_dim
-        self.d_size = d_size
-        self.h_size = h_size
-        self.w_size = w_size
+        self.d_size = int(d_size)
+        self.h_size = int(h_size)
+        self.w_size = int(w_size)
 
-        # Create 3 separate learnable parameter matrices representing the 3D axes
-        self.pos_d = nn.Parameter(torch.randn(1, d_size, 1, 1, embed_dim))
-        self.pos_h = nn.Parameter(torch.randn(1, 1, h_size, 1, embed_dim))
-        self.pos_w = nn.Parameter(torch.randn(1, 1, 1, w_size, embed_dim))
+        self.pos_d = nn.Parameter(torch.randn(1, self.d_size, 1, 1, embed_dim))
+        self.pos_h = nn.Parameter(torch.randn(1, 1, self.h_size, 1, embed_dim))
+        self.pos_w = nn.Parameter(torch.randn(1, 1, 1, self.w_size, embed_dim))
 
+    def forward(self, x_tokens, spatial_size=None):
+        # x_tokens: Shape [B, N_vox, C]
+        D, H, W = spatial_size or (self.d_size, self.h_size, self.w_size)
+        D, H, W = int(D), int(H), int(W)
+        if x_tokens.shape[1] != D * H * W:
+            raise ValueError(
+                f"Sequence length {x_tokens.shape[1]} does not match spatial size {(D, H, W)}"
+            )
 
-    def forward(self, x_tokens):
-        # x_tokens: Shape [B, N_vox, C] (where N_vox = d_size * h_size * w_size)
-        B, N_vox, C = x_tokens.shape 
-        assert N_vox == self.d_size * self.h_size * self.w_size, "Sequence length does not match grid dimensions"
-
-        # 1. Broadcast add the 3 axes to form a 3D coordinate grid
-        # [1, D, 1, 1, C] + [1, 1, H, 1, C] + [1, 1, 1, W, C] -> [1, D, H, W, C]
         grid = self.pos_d + self.pos_h + self.pos_w
+        if (D, H, W) != (self.d_size, self.h_size, self.w_size):
+            grid = F.interpolate(
+                grid.permute(0, 4, 1, 2, 3),
+                size=(D, H, W),
+                mode="trilinear",
+                align_corners=True,
+            ).permute(0, 2, 3, 4, 1)
 
-        # 2. Flatten the spatial grid to match the token shape 
-        # [1, D, H, W, C] -> [1, D*H*W, C]
-        flat_grid = grid.view(1, self.d_size * self.h_size * self.w_size, self.embed_dim)
-
-        # 3. Add posotional embedding to the input tokens (broadcast over batch B)
+        flat_grid = grid.reshape(1, D * H * W, self.embed_dim)
         return x_tokens + flat_grid
 
 
 
 class CrossVolumeAttention(nn.Module):
     """
-    Aligns secondary-modality visual features (e.g. T2 W/O diffusion) to the T1 spatial grid.
-    The T1 bottleneck features act as Queries (defining the spatial output grid),
-    while the secondary features act as Keys and Values.
+    Aligns secondary-modality visual features to the primary (output-space) grid.
+    Primary bottleneck features act as Queries; secondary features are Keys and Values.
     """
 
     def __init__(self, embed_dim=128, num_heads=4, d_size=16, h_size=16, w_size=16):
         super().__init__()
         self.embed_dim = embed_dim
 
-        # Instantiate 3D positional encoders for both modality branches
-        self.pos_t1 = PositionalEncoding3D(embed_dim, d_size, h_size, w_size)
+        self.pos_primary = PositionalEncoding3D(embed_dim, d_size, h_size, w_size)
         self.pos_sec = PositionalEncoding3D(embed_dim, d_size, h_size, w_size)
-        
-        # Standard PyTorch Multihead Attention
+
         self.mha = nn.MultiheadAttention(embed_dim, num_heads, batch_first=True)
-        
-        # Normalization and residual scaling
         self.norm = nn.LayerNorm(embed_dim)
 
-    def forward(self, t1_features, secondary_features):
-        # t1_features (Query Source):            Shape [B, C, D_t1, H_t1, W_t1]
-        # secondary_features (Key/Value Source): Shape [B, C, D_s, H_s, W_s]
-        B, C, D_t1, H_t1, W_t1 = t1_features.shape
+    def forward(self, primary_features, secondary_features):
+        # primary_features:   Shape [B, C, D_p, H_p, W_p]
+        # secondary_features: Shape [B, C, D_s, H_s, W_s]
+        B, C, D_p, H_p, W_p = primary_features.shape
         _, _, D_s, H_s, W_s = secondary_features.shape
 
-        # 1. Flatten the 3D spatial dimensions of both volumes into sequences of tokens
-        # [B, C, D, H, W] -> [B, C, D*H*W] -> [B, D*H*W, C]
-        q_tokens = t1_features.view(B, C, D_t1 * H_t1 * W_t1).transpose(1, 2)  # Shape: [B, N_t1, C]
-        kv_tokens = secondary_features.view(B, C, D_s * H_s * W_s).transpose(1, 2)  # Shape: [B, N_s, C]
+        q_tokens = primary_features.reshape(B, C, D_p * H_p * W_p).transpose(1, 2)
+        kv_tokens = secondary_features.reshape(B, C, D_s * H_s * W_s).transpose(1, 2)
 
-        # 2. Add 3D Positional Embedddings to Queries (Q) and Keys (K)
-        # We leave the Values (V) raw so the features are not distorted by coordinate values
-        q_tokens_with_pos = self.pos_t1(q_tokens)
-        k_tokens_with_pos = self.pos_sec(kv_tokens)
+        q_tokens_with_pos = self.pos_primary(q_tokens, (D_p, H_p, W_p))
+        k_tokens_with_pos = self.pos_sec(kv_tokens, (D_s, H_s, W_s))
 
-        # 3. Run Cross-Attention
-        # Query: T1 (with pos), Keys: T2 (with pos), Values: T2 (raw)
-        # Output shape: [B, N_t1, C]
         attn_out, _ = self.mha(query=q_tokens_with_pos, key=k_tokens_with_pos, value=kv_tokens)
+        fused_tokens = self.norm(attn_out + q_tokens)
 
-        # 4. Residual connection and Layer Normalization
-        fused_tokens = self.norm(attn_out + q_tokens) # Shape: [B, N_t1, C]
-
-        # 5. Reshape back into a 3D spatial grid (matching T1 spatial dimensions)
-        # [B, N_t1, C] -> [B, C, N_t1] -> [B, C, D_t1, H_t1, W_t1]
-        fused_spatial = fused_tokens.transpose(1, 2).view(B, C, D_t1, H_t1, W_t1)
-        return fused_spatial
+        return fused_tokens.transpose(1, 2).reshape(B, C, D_p, H_p, W_p)
 
 
 class PromptDecoder(nn.Module):
     """
     Aligns raw text prompt embeddings to the consolidated multi-modal visual map.
-    Text prompt tokens act as Queries; fused T1 + secondary visual features are Keys/Values.
+    Text prompt tokens act as Queries; fused primary + secondary visual features are Keys/Values.
     """
 
     def __init__(self, text_dim=768, embed_dim=128, num_heads=4, d_size=16, h_size=16, w_size=16):
@@ -120,18 +125,12 @@ class PromptDecoder(nn.Module):
 
         # 2. Flatten the fused 3D visual map to serve as the visual key/value memory
         # [B, C, D_t1, H_t1, W_t1] -> [B, C, D_t1*H_t1*W_t1] -> [B, D_t1*H_t1*W_t1, C]
-        kv_tokens = fused_visual_features.view(B, C, D_t1 * H_t1 * W_t1).transpose(1, 2) # Shape: [B, N_t1, C]
+        kv_tokens = fused_visual_features.reshape(B, C, D_t1 * H_t1 * W_t1).transpose(1, 2)
+        k_tokens_with_pos = self.pos_encoder(kv_tokens, (D_t1, H_t1, W_t1))
 
-        # 3. Add 3D Positional Embeddings to the visual Keys (K)
-        # Allows prompt queries to map semantic terms directly to physical coordinates
-        k_tokens_with_pos = self.pos_encoder(kv_tokens)
-
-        # 4. Run Language-to-Visual Cross-Attention
-        # Query: Text, Key: Visual (with Pos), Value: Visual (Raw features)
-        # Output shape: [B, N_T, C]
         attn_out, _ = self.mha(query=q_tokens, key=k_tokens_with_pos, value=kv_tokens)
 
-        # 4. Residual and Normalization
+        # 3. Residual and Normalization
         aligned_queries = self.norm(attn_out + q_tokens) # Shape: [B, N_T, C]
 
         return aligned_queries

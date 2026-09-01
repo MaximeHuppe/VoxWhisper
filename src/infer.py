@@ -16,19 +16,27 @@ RoiSize = Union[Sequence[int], int]
 
 class SlidingWindowPredictor:
     """
-    Adapt VoxWhisper's ``(t1, t2, text)`` forward to MONAI's single-tensor API.
+    Adapt VoxWhisper's ``(primary, secondary, text)`` forward to MONAI's single-tensor API.
 
-    MONAI feeds overlapping crops of shape ``[B, C, D, H, W]``. We pack T1 and
-    T2 as two channels, split them here, broadcast the cached prompt embeddings
-    to the sliding-window batch, and return only the full-resolution decoder
-    stage so stitching matches the native T1 grid.
+    MONAI feeds overlapping crops of shape ``[B, C, D, H, W]``. We pack primary
+    and secondary along the channel axis, split them here, broadcast the cached
+    prompt embeddings to the sliding-window batch, and return only the
+    full-resolution decoder stage so stitching matches the native primary grid.
 
     Implemented as a plain callable (not an ``nn.Module``) so wrapping the
     trained model does not re-register its parameters as a submodule.
     """
 
-    def __init__(self, model: nn.Module, text_embeddings: torch.Tensor):
+    def __init__(
+        self,
+        model: nn.Module,
+        text_embeddings: torch.Tensor,
+        primary_channels: int = 1,
+        secondary_channels: int = 1,
+    ):
         self.model = model
+        self.primary_channels = int(primary_channels)
+        self.secondary_channels = int(secondary_channels)
         if text_embeddings.dim() == 3:
             text_embeddings = text_embeddings[0]
         if text_embeddings.dim() != 2:
@@ -39,16 +47,18 @@ class SlidingWindowPredictor:
         self.text_embeddings = text_embeddings.detach().contiguous()
 
     def __call__(self, inputs: torch.Tensor) -> torch.Tensor:
-        if inputs.ndim != 5 or inputs.shape[1] != 2:
+        expected_c = self.primary_channels + self.secondary_channels
+        if inputs.ndim != 5 or inputs.shape[1] != expected_c:
             raise ValueError(
-                "Expected concatenated T1/T2 input [B, 2, D, H, W], "
-                f"got {tuple(inputs.shape)}"
+                "Expected concatenated primary/secondary input "
+                f"[B, {expected_c}, D, H, W], got {tuple(inputs.shape)}"
             )
-        t1 = inputs[:, 0:1]
-        t2 = inputs[:, 1:2]
+        c1 = self.primary_channels
+        primary = inputs[:, :c1]
+        secondary = inputs[:, c1:]
         text = self.text_embeddings.to(device=inputs.device, dtype=inputs.dtype)
         text = text.unsqueeze(0).expand(inputs.shape[0], -1, -1)
-        predictions = self.model(t1, t2, text)
+        predictions = self.model(primary, secondary, text)
         if isinstance(predictions, (list, tuple)):
             return predictions[-1]
         return predictions
@@ -56,8 +66,8 @@ class SlidingWindowPredictor:
 
 def predict_full_volume(
     model: nn.Module,
-    t1: torch.Tensor,
-    t2: torch.Tensor,
+    primary: torch.Tensor,
+    secondary: torch.Tensor,
     text_embeddings: torch.Tensor,
     roi_size: RoiSize = (128, 128, 128),
     sw_batch_size: int = 2,
@@ -74,8 +84,9 @@ def predict_full_volume(
 
     Parameters
     ----------
-    t1, t2 :
-        ``[B, 1, D, H, W]`` volumes in the same voxel grid (T1 is the output space).
+    primary, secondary :
+        ``[B, C, D, H, W]`` volumes sharing the same spatial grid (primary is
+        the output space).
     text_embeddings :
         Cached prompt tokens, ``[N_T, dim]`` or ``[B, N_T, dim]``.
     roi_size :
@@ -92,15 +103,20 @@ def predict_full_volume(
     logits : torch.Tensor
         Full-resolution prompt logits ``[B, N_T, D, H, W]`` on ``device``.
     """
-    if t1.shape != t2.shape:
+    if primary.shape[0] != secondary.shape[0] or primary.shape[2:] != secondary.shape[2:]:
         raise ValueError(
-            f"T1/T2 shape mismatch: {tuple(t1.shape)} vs {tuple(t2.shape)}"
+            f"Primary/secondary shape mismatch: {tuple(primary.shape)} vs {tuple(secondary.shape)}"
         )
-    if t1.ndim != 5 or t1.shape[1] != 1:
-        raise ValueError(f"Expected T1 [B, 1, D, H, W], got {tuple(t1.shape)}")
+    if primary.ndim != 5:
+        raise ValueError(f"Expected primary [B, C, D, H, W], got {tuple(primary.shape)}")
 
-    inputs = torch.cat([t1, t2], dim=1)
-    predictor = SlidingWindowPredictor(model, text_embeddings)
+    inputs = torch.cat([primary, secondary], dim=1)
+    predictor = SlidingWindowPredictor(
+        model,
+        text_embeddings,
+        primary_channels=primary.shape[1],
+        secondary_channels=secondary.shape[1],
+    )
 
     was_training = model.training
     model.eval()
@@ -143,24 +159,26 @@ def load_subject_for_inference(
     subject_id: str,
 ) -> Tuple[np.ndarray, np.ndarray, Optional[np.ndarray], np.ndarray]:
     """
-    Load full-resolution T1, T2, optional integer mask, and the T1 affine.
+    Load full-resolution primary and secondary volumes, optional integer mask,
+    and the primary affine.
 
     Returns
     -------
-    t1, t2 : float32 arrays ``(D, H, W)``
+    primary, secondary : float32 arrays ``(D, H, W)``
     labels : int16 array ``(D, H, W)`` or ``None`` if no mask is on disk
-    affine : (4, 4) voxel-to-world matrix from the T1 NIfTI
+    affine : (4, 4) voxel-to-world matrix from the primary NIfTI
     """
     from src.utils.config import active_modality_keys
 
-    primary, secondary = active_modality_keys(config)
+    primary_key, secondary_key = active_modality_keys(config)
     processed_dir = resolve_path(config, "data.paths.processed")
 
-    t1, affine = load_nifti(volume_path(processed_dir, subject_id, primary))
-    t2, _ = load_nifti(volume_path(processed_dir, subject_id, secondary))
-    if t1.shape != t2.shape:
+    primary, affine = load_nifti(volume_path(processed_dir, subject_id, primary_key))
+    secondary, _ = load_nifti(volume_path(processed_dir, subject_id, secondary_key))
+    if primary.shape != secondary.shape:
         raise ValueError(
-            f"T1/T2 shape mismatch for {subject_id}: {t1.shape} vs {t2.shape}"
+            f"Primary/secondary shape mismatch for {subject_id}: "
+            f"{primary.shape} vs {secondary.shape}"
         )
 
     labels: Optional[np.ndarray] = None
@@ -169,22 +187,23 @@ def load_subject_for_inference(
         labels_f, _ = load_nifti(mpath)
         if labels_f.ndim != 3:
             raise ValueError(f"Expected 3D mask at {mpath}, got {labels_f.shape}")
-        if labels_f.shape != t1.shape:
+        if labels_f.shape != primary.shape:
             raise ValueError(
-                f"Mask shape {labels_f.shape} != T1 shape {t1.shape} for {subject_id}"
+                f"Mask shape {labels_f.shape} != primary shape {primary.shape} "
+                f"for {subject_id}"
             )
         labels = np.rint(labels_f).astype(np.int16)
 
-    return t1, t2, labels, affine
+    return primary, secondary, labels, affine
 
 
 def volumes_to_tensors(
-    t1: np.ndarray, t2: np.ndarray
+    primary: np.ndarray, secondary: np.ndarray
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """``(D, H, W)`` NumPy → ``[1, 1, D, H, W]`` float tensors."""
-    t1_t = torch.from_numpy(np.ascontiguousarray(t1)).float().unsqueeze(0).unsqueeze(0)
-    t2_t = torch.from_numpy(np.ascontiguousarray(t2)).float().unsqueeze(0).unsqueeze(0)
-    return t1_t, t2_t
+    primary_t = torch.from_numpy(np.ascontiguousarray(primary)).float().unsqueeze(0).unsqueeze(0)
+    secondary_t = torch.from_numpy(np.ascontiguousarray(secondary)).float().unsqueeze(0).unsqueeze(0)
+    return primary_t, secondary_t
 
 
 def logits_to_label_map(logits: torch.Tensor) -> torch.Tensor:

@@ -2,13 +2,13 @@
 import torch
 import torch.nn as nn
 from .encoder import Encoder, ResidualBlock
-from .attention import CrossVolumeAttention, PromptDecoder
+from .attention import CrossVolumeAttention, PromptDecoder, bottleneck_spatial_size
 from .decoder import Decoder
 
 
 _PIPELINE_STEPS = {
-    "t1_encoder": "Step 1  T1 visual encoder",
-    "t2_encoder": "Step 1  T2 visual encoder",
+    "primary_encoder": "Step 1  Primary visual encoder",
+    "secondary_encoder": "Step 1  Secondary visual encoder",
     "cross_volume_attention": "Step 2  Spatial alignment (cross-volume MHA)",
     "prompt_decoder": "Step 3  Semantic alignment (prompt decoder)",
     "decoder": "Step 4  Hierarchical decoder + deep supervision",
@@ -78,8 +78,8 @@ def _iter_captured(captured, prefix="out"):
 
 def _output_labels(module, n_tensors):
     name = type(module).__name__
-    if name == "Encoder" and n_tensors == 4:
-        return ["bottleneck", "skip3", "skip2", "skip1"]
+    if name == "Encoder" and n_tensors >= 1:
+        return ["bottleneck"] + [f"skip{i}" for i in range(1, n_tensors)]
     if name in {"Decoder", "VoxWhisper"} and n_tensors == 3:
         return ["pred ×1/4", "pred ×1/2", "pred ×1"]
     if name == "MultiheadAttention" and n_tensors == 2:
@@ -128,13 +128,15 @@ def _count_types(module):
 class VoxWhisper(nn.Module):
     """
     VoxWhisper: A 3D Multi-Modal, Language-Grounded Volumetric Segmentation Model.
-    Fuses unregistered T1 and T2 structural MRIs, aligns them with clinical prompts,
-    and reconstructs prompt-conditioned segmentation masks in the T1 coordinate space.
+    Fuses a primary volume (output space, typically T1) with a secondary volume
+    (T2, MD, ...), aligns them with clinical prompts, and reconstructs
+    prompt-conditioned segmentation masks in the primary coordinate space.
     """
 
     def __init__(
         self,
         input_channels=1,
+        secondary_input_channels=None,
         text_dim=768,
         embed_dim=128,
         channels=None,
@@ -143,6 +145,7 @@ class VoxWhisper(nn.Module):
         paddings=None,
         num_resblocks=None,
         num_heads=4,
+        pe_size=None,
     ):
         super().__init__()
 
@@ -156,27 +159,40 @@ class VoxWhisper(nn.Module):
             paddings = [1, 1, 1]
         if num_resblocks is None:
             num_resblocks = [1, 1, 1]
+        if secondary_input_channels is None:
+            secondary_input_channels = input_channels
+        if pe_size is None:
+            pe_size = (16, 16, 16)
+        pe_size = tuple(int(x) for x in pe_size)
 
-        # 1. Visual Encoders (T1 Branch & T2 Branch)
+        # Dual visual encoders (primary = output space)
         encoder_kwargs = dict(
-            input_channels=input_channels,
             channels=channels,
             strides=strides,
             kernel_sizes=kernel_sizes,
             paddings=paddings,
             num_resblocks=num_resblocks,
         )
-        self.t1_encoder = Encoder(**encoder_kwargs)
-        self.t2_encoder = Encoder(**encoder_kwargs)
+        self.primary_encoder = Encoder(input_channels=input_channels, **encoder_kwargs)
+        self.secondary_encoder = Encoder(input_channels=secondary_input_channels, **encoder_kwargs)
 
-        # 2. Visual-to-Visual Alignment (Fuses T2 into T1 coordinate space)
+        # 2. Visual-to-Visual Alignment
         self.cross_volume_attention = CrossVolumeAttention(
-            embed_dim=embed_dim, num_heads=num_heads
+            embed_dim=embed_dim,
+            num_heads=num_heads,
+            d_size=pe_size[0],
+            h_size=pe_size[1],
+            w_size=pe_size[2],
         )
 
         # 3. Language-to-Visual Alignment
         self.prompt_decoder = PromptDecoder(
-            text_dim=text_dim, embed_dim=embed_dim, num_heads=num_heads
+            text_dim=text_dim,
+            embed_dim=embed_dim,
+            num_heads=num_heads,
+            d_size=pe_size[0],
+            h_size=pe_size[1],
+            w_size=pe_size[2],
         )
 
         # 4. Hierarchical Decoder with Channel Modulation & Deep Supervision
@@ -187,8 +203,16 @@ class VoxWhisper(nn.Module):
         """Construct the model from the ``model`` section of a YAML config."""
         model_cfg = config["model"]
         enc = model_cfg["encoder"]
+        sec_enc = model_cfg.get("secondary_encoder") or {}
+        secondary_input_channels = sec_enc.get(
+            "input_channels", model_cfg["input_channels"]
+        )
+        pe_size = bottleneck_spatial_size(
+            config["data"]["patch"]["size"], enc["strides"]
+        )
         return cls(
             input_channels=model_cfg["input_channels"],
+            secondary_input_channels=secondary_input_channels,
             text_dim=model_cfg["text_dim"],
             embed_dim=model_cfg["embed_dim"],
             channels=enc["channels"],
@@ -197,6 +221,7 @@ class VoxWhisper(nn.Module):
             paddings=enc["paddings"],
             num_resblocks=enc["num_resblocks"],
             num_heads=model_cfg["num_heads"],
+            pe_size=pe_size,
         )
 
     def print_summary(self, config=None, *, max_depth=4):
@@ -207,7 +232,7 @@ class VoxWhisper(nn.Module):
         device = str(p0.device) if p0 is not None else "n/a"
         dtype = str(p0.dtype) if p0 is not None else "n/a"
 
-        enc = self.t1_encoder
+        enc = self.primary_encoder
         channels = [enc.stem[0].out_channels] + [
             stage.transition[0].out_channels for stage in enc.stages
         ]
@@ -313,24 +338,26 @@ class VoxWhisper(nn.Module):
 
         if dummy is not None and io_map is not None:
             print(thin)
-            t1, t2, text = dummy
+            primary, secondary, text = dummy
             print(
                 "  Forward activation tensors  "
-                f"(t1/t2 {_fmt_shape(t1.shape)},  text {_fmt_shape(text.shape)})"
+                f"(primary {_fmt_shape(primary.shape)},  "
+                f"secondary {_fmt_shape(secondary.shape)},  "
+                f"text {_fmt_shape(text.shape)})"
             )
             print(thin)
             act_rows = [
                 (
                     "input",
-                    "t1_volume",
-                    _fmt_shape(t1.shape),
-                    _fmt_bytes(t1.numel() * t1.element_size()),
+                    "primary_volume",
+                    _fmt_shape(primary.shape),
+                    _fmt_bytes(primary.numel() * primary.element_size()),
                 ),
                 (
                     "input",
-                    "t2_volume",
-                    _fmt_shape(t2.shape),
-                    _fmt_bytes(t2.numel() * t2.element_size()),
+                    "secondary_volume",
+                    _fmt_shape(secondary.shape),
+                    _fmt_bytes(secondary.numel() * secondary.element_size()),
                 ),
                 (
                     "input",
@@ -355,15 +382,22 @@ class VoxWhisper(nn.Module):
         p0 = next(self.parameters())
         patch = tuple(int(x) for x in config["data"]["patch"]["size"])
         batch = int(config["training"]["batch_size"])
-        channels = int(config["model"]["input_channels"])
+        primary_ch = int(self.primary_encoder.stem[0].in_channels)
+        secondary_ch = int(self.secondary_encoder.stem[0].in_channels)
         n_prompts = len(config["data"]["prompts"])
         text_dim = int(config["model"]["text_dim"])
 
         def _make(batch_size):
-            t1 = torch.zeros(batch_size, channels, *patch, device=p0.device, dtype=p0.dtype)
-            t2 = torch.zeros(batch_size, channels, *patch, device=p0.device, dtype=p0.dtype)
-            text = torch.zeros(batch_size, n_prompts, text_dim, device=p0.device, dtype=p0.dtype)
-            return t1, t2, text
+            primary = torch.zeros(
+                batch_size, primary_ch, *patch, device=p0.device, dtype=p0.dtype
+            )
+            secondary = torch.zeros(
+                batch_size, secondary_ch, *patch, device=p0.device, dtype=p0.dtype
+            )
+            text = torch.zeros(
+                batch_size, n_prompts, text_dim, device=p0.device, dtype=p0.dtype
+            )
+            return primary, secondary, text
 
         io_map = {}
 
@@ -442,55 +476,39 @@ class VoxWhisper(nn.Module):
                     child, prefix + "  ", depth + 1, max_depth, io_map, rows
                 )
 
-    def forward(self, t1_volume, t2_volume, text_embeddings):
-        # t1_volume:       Shape [B, 1, D_t1, H_t1, W_t1]
-        # t2_volume:       Shape [B, 1, D_t2, H_t2, W_t2]  (may be unregistered)
-        # text_embeddings: Shape [B, N_T, text_dim]
+    def forward(self, primary_volume, secondary_volume, text_embeddings):
+        # primary_volume:   Shape [B, C_p, D, H, W]  (output coordinate space)
+        # secondary_volume: Shape [B, C_s, D, H, W]
+        # text_embeddings:  Shape [B, N_T, text_dim]
 
         # ==========================================
         # STEP 1: Feature Extraction (Encoders)
         # ==========================================
-        # T1 path captures skip connections
-        t1_bottleneck, skip3, skip2, skip1 = self.t1_encoder(t1_volume)
-        # t1_bottleneck shape: [B, 128, D_t1//8, H_t1//8, W_t1//8]
-
-        # T2 path does not capture skip connections
-        t2_bottleneck, _, _, _ = self.t2_encoder(t2_volume)
-        # t2_bottleneck shape: [B, 128, D_t2//8, H_t2//8, W_t2//8]
+        primary_bottleneck, skips = self.primary_encoder(primary_volume)
+        secondary_bottleneck, _ = self.secondary_encoder(secondary_volume)
 
         # ==========================================
         # STEP 2: Spatial Alignment (Cross-Volume MHA)
         # ==========================================
-        # Projects Diffusion features to align with the T1 bottleneck layout
+
         fused_visual_map = self.cross_volume_attention(
-            t1_features=t1_bottleneck,
-            secondary_features=t2_bottleneck,
+            primary_features=primary_bottleneck,
+            secondary_features=secondary_bottleneck,
         )
-        # fused_visual_map shape: [B, 128, D_t1//8, H_t1//8, W_t1//8]
 
         # ==========================================
         # STEP 3: Semantic Alignment (Prompt Decoder MHA)
         # ==========================================
-        # Aligns text tokens to the unified spatial visual feature map
         aligned_queries = self.prompt_decoder(
-            text_embeddings=text_embeddings, 
-            fused_visual_features=fused_visual_map
-        ) # Shape: [B, N_T, 128]
+            text_embeddings=text_embeddings,
+            fused_visual_features=fused_visual_map,
+        )
 
         # ==========================================
         # STEP 4: Reconstruction (Multi-Scale Decoder)
         # ==========================================
-        skips = [skip1, skip2, skip3]
-        
-        # Decoder performs channel-wise scaling and outputs multi-resolution masks
-        stage_predictions = self.decoder(
+        return self.decoder(
             fused_bottleneck=fused_visual_map,
             skips=skips,
             aligned_queries=aligned_queries,
         )
-        
-        # Returns list of 3D mask logits for deep supervision loss computation:
-        # stage_predictions[0]: Lowest resolution [B, N_T, D_t1//4, H_t1//4, W_t1//4]
-        # stage_predictions[1]: Middle resolution [B, N_T, D_t1//2, H_t1//2, W_t1//2]
-        # stage_predictions[2]: Final resolution  [B, N_T, D_t1, H_t1, W_t1]
-        return stage_predictions

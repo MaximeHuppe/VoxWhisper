@@ -87,14 +87,17 @@ class Encoder(nn.Module):
             self.stages.append(stage)
 
     def forward(self, x):
-        # 1. Run Stem (highest resolution)
-        skip1 = self.stem(x)
-        
-        # 2. Run sequential stages while capturing skip connections
-        skip2 = self.stages[0](skip1)
-        skip3 = self.stages[1](skip2)
-        
-        # 3. Final bottleneck output
-        F_t1 = self.stages[2](skip3)
-        
-        return F_t1, skip3, skip2, skip1
+        if not self.stages:
+            raise ValueError("Encoder requires at least one downsampling stage")
+
+        skips = []
+        x = self.stem(x)
+        skips.append(x)
+
+        *down_stages, bottleneck_stage = self.stages
+        for stage in down_stages:
+            x = stage(x)
+            skips.append(x)
+
+        bottleneck = bottleneck_stage(x)
+        return bottleneck, skips
