@@ -38,6 +38,56 @@ from src.training.validate import evaluate_patches, evaluate_volume_dice
 _GRAD_CLIP_NORM = 1.0
 
 
+def _print_run_header(
+    config: dict,
+    run_path,
+    device,
+    seed: int,
+    ckpt_cfg: dict,
+    train_loader,
+    val_loader,
+) -> None:
+    """Print a compact one-time summary at training start."""
+    train_cfg = config["training"]
+    modalities = config["data"].get("modalities", {})
+    structures = config["data"].get("structure_names") or config["data"].get("prompts", [])
+    n_structs = len(structures)
+    struct_preview = ", ".join(structures[:4])
+    if n_structs > 4:
+        struct_preview += f", … (+{n_structs - 4})"
+
+    n_train_subj = len(getattr(train_loader.dataset, "subject_ids", []))
+    n_train_patches = len(train_loader.dataset)
+    n_train_steps = len(train_loader)
+
+    val_line = "—"
+    if val_loader is not None:
+        n_val_subj = len(getattr(val_loader.dataset, "subject_ids", []))
+        n_val_patches = len(val_loader.dataset)
+        val_line = f"{n_val_subj} subjects · {n_val_patches} patches"
+
+    run_name = config["training"].get("run_name", "?")
+    dataset = str(run_path).split("/")[-3] if len(str(run_path).split("/")) >= 3 else "?"
+
+    sep = "─" * 66
+    print(sep)
+    print(f"  VoxWhisper  ·  {run_name}  ·  {dataset}")
+    print(sep)
+    print(f"  Run        {run_path}")
+    print(f"  Device     {device:<20}  Seed     {seed}")
+    print(f"  Epochs     {train_cfg['epochs']:<8}  LR  {train_cfg['learning_rate']:.2e}"
+          f"    Batch  {train_cfg['batch_size']}")
+    print(f"  Monitor    {describe_monitor(ckpt_cfg)}")
+    print(f"  Structures {n_structs}  [{struct_preview}]")
+    print(sep)
+    print(f"  Modalities primary={modalities.get('primary','?')}  "
+          f"secondary={modalities.get('secondary','?')}")
+    print(f"  Train      {n_train_subj} subjects · {n_train_patches} patches"
+          f" · {n_train_steps} steps/epoch")
+    print(f"  Val        {val_line}")
+    print(sep)
+
+
 def build_loaders(config: dict, seed: int):
     """Create train (and optional val) DataLoaders from config.
 
@@ -125,6 +175,7 @@ def train_model(
     name_override: str | None = None,
     run_dir: str | None = None,
     config_path: str | None = None,
+    verbose: bool = False,
 ) -> None:
     train_cfg = config["training"]
     seed = get_training_seed(config)
@@ -139,7 +190,6 @@ def train_model(
     )
 
     epochs = train_cfg["epochs"]
-    learning_rate = train_cfg["learning_rate"]
     deep_sup_weights = train_cfg["deep_supervision_weights"]
 
     run_path = create_or_resume_run(
@@ -150,11 +200,6 @@ def train_model(
         config_path=config_path,
         seed=seed,
     )
-    print(f"Run directory: {run_path}")
-    print(f"Training seed: {seed}")
-    print(f"Checkpoint monitor: {describe_monitor(ckpt_cfg)}")
-    print(f"Device: {device}")
-    print("Initializing dataset and dataloader...")
     train_loader, val_loader = build_loaders(config, seed)
 
     if val_loader is None:
@@ -167,7 +212,11 @@ def train_model(
             f"training.deep_supervision_weights has {len(deep_sup_weights)} values, "
             f"but the decoder has {n_decoder_stages} stages"
         )
-    model.print_summary(config)
+
+    if verbose:
+        model.print_summary(config)
+
+    _print_run_header(config, run_path, device, seed, ckpt_cfg, train_loader, val_loader)
 
     n_prompts = len(config["data"]["prompts"])
     class_names = config["data"].get("structure_names") or config["data"]["prompts"]
@@ -296,6 +345,11 @@ if __name__ == "__main__":
             "If no checkpoint exists, training starts a new run with a warning."
         ),
     )
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Print full model architecture summary at startup",
+    )
     args = parser.parse_args()
     cfg = load_config(args.config)
     train_model(
@@ -304,4 +358,5 @@ if __name__ == "__main__":
         name_override=args.name,
         run_dir=args.run_dir,
         config_path=args.config,
+        verbose=args.verbose,
     )

@@ -90,16 +90,13 @@ class TrainingLogger:
 
         if resume:
             if path.exists():
-                print(f"[Logger] Appending to existing run log: {path.name}")
                 return open(path, "a", encoding="utf-8")  # noqa: SIM115
             # Legacy flat layout: run_YYYYMMDD_HHMMSS.jsonl
             legacy = sorted(self.run_dir.glob("run_*.jsonl"))
             if legacy:
                 path = legacy[-1]
-                print(f"[Logger] Appending to legacy run log: {path.name}")
                 return open(path, "a", encoding="utf-8")  # noqa: SIM115
 
-        print(f"[Logger] Writing run log to: {path.name}")
         return open(path, "w", encoding="utf-8")  # noqa: SIM115
 
     # ------------------------------------------------------------------
