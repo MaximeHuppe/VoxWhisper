@@ -1,131 +1,179 @@
+"""3D upsampling decoder with hierarchical vision-language fusion.
+
+Architecture
+------------
+The decoder unrolls the encoder's skip connections bottom-up.  At each scale
+it performs:
+
+  1. Trilinear upsample to the skip's spatial resolution.
+  2. Skip concatenation + 3×3×3 conv to merge channels.
+  3. ``StageVLFusionBlock``: channel-wise sigmoid gating conditioned on the
+     language queries, followed by a scaled dot-product to produce per-prompt
+     mask logits at this resolution.
+
+All three decoder outputs (1/4, 1/2, full resolution) are returned for deep
+supervision during training; only the last (full-resolution) output is used at
+inference.
+"""
+from __future__ import annotations
+
+import math
+from typing import List, Optional, Tuple
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+
 class StageVLFusionBlock(nn.Module):
+    """Vision-language fusion at a single decoder scale.
+
+    Given visual feature maps and the language-aligned query tokens produced by
+    ``PromptDecoder``, this block:
+
+    1. **Channel gating** – projects the mean query vector to the visual channel
+       dimension and applies a sigmoid gate, suppressing channels not relevant
+       to the active prompt set.
+    2. **Mask projection** – computes per-voxel, per-prompt affinities via a
+       scaled dot-product between the (per-prompt) queries and every spatial
+       voxel, producing logit maps of shape ``[B, N_T, D, H, W]``.
+
+    The scaling factor ``1 / sqrt(visual_channels)`` prevents the dot products
+    from growing large when ``visual_channels`` is large, avoiding sigmoid
+    saturation in the mask head.
+
+    Parameters
+    ----------
+    visual_channels:
+        Spatial feature channels at this decoder stage (e.g. 64, 32, 16).
+    query_dim:
+        Dimensionality of the aligned language queries from ``PromptDecoder``
+        (equal to the model's global ``embed_dim``).
     """
-    Integrates the aligned text queries with visual features at a specific scale.
-    Performs channel-wise modulation (gating) and projects the intermediate 
-    segmentation masks using a spatial-semantic dot product.
-    """
-    def __init__(self, visual_channels, query_dim=128):
+
+    def __init__(self, visual_channels: int, query_dim: int = 128) -> None:
         super().__init__()
         self.visual_channels = visual_channels
-        
-        # Projects global queries to match scale-specific visual channels
+        self.scale = 1.0 / math.sqrt(visual_channels)
+
         self.query_adapter = nn.Sequential(
             nn.Linear(query_dim, visual_channels),
-            nn.ReLU(),
-            nn.Linear(visual_channels, visual_channels)
+            nn.ReLU(inplace=True),
+            nn.Linear(visual_channels, visual_channels),
         )
 
-    def forward(self, visual_features, aligned_queries):
-        # visual_features: Shape [B, C_vis, D, H, W]
-        # aligned_queries:  Shape [B, N_T, C_query]
-        B, C_vis, D, H, W = visual_features.shape
-        N_T = aligned_queries.shape[1]
+    def forward(
+        self,
+        visual_features: torch.Tensor,
+        aligned_queries: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Parameters
+        ----------
+        visual_features : [B, C_vis, D, H, W]
+        aligned_queries : [B, N_T, C_query]
 
-        # 1. Project aligned queries to match this scale's visual channel depth
-        # [B, N_T, C_query] -> [B, N_T, C_vis]
+        Returns
+        -------
+        modulated_vis  : [B, C_vis, D, H, W]  – channel-gated features
+        mask_logits    : [B, N_T, D, H, W]    – per-prompt spatial logits
+        """
+        B, C_vis, D, H, W = visual_features.shape
+
+        # Project each query token to the visual channel space: [B, N_T, C_vis]
         projected_queries = self.query_adapter(aligned_queries)
 
-        # 2. Extract a Global Semantic Gating vector (mean pool over prompt sequence)
-        # [B, N_T, C_vis] -> [B, C_vis]
-        global_text = projected_queries.mean(dim=1)
+        # Mean-pool over prompts → global gating vector [B, C_vis] → [B, C_vis, 1, 1, 1]
+        gate = torch.sigmoid(projected_queries.mean(dim=1)).view(B, C_vis, 1, 1, 1)
+        modulated_vis = visual_features * gate
 
-        # 3. Channel-wise Modulation (Sigmoid Gating)
-        # Reshape scale vector to [B, C_vis, 1, 1, 1] to allow broadcasting over 3D dimensions
-        scale = torch.sigmoid(global_text).unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)
-        modulated_vis = visual_features * scale # Shape: [B, C_vis, D, H, W]
-
-        # 4. Mask Generation via Batch Matrix Multiplication (Dot Product)
-        # Flatten spatial dimensions to shape: [B, C_vis, D * H * W]
+        # Scaled dot-product: queries × voxels → [B, N_T, D*H*W] → [B, N_T, D, H, W]
         flat_vis = modulated_vis.view(B, C_vis, D * H * W)
-
-        # Compute dot product between each query token and each spatial voxel:
-        # projected_queries: [B, N_T, C_vis]
-        # flat_vis:          [B, C_vis, D * H * W]
-        # [B, N_T, C_vis] x [B, C_vis, D * H * W] -> [B, N_T, D * H * W]
-        mask_logits_flat = torch.bmm(projected_queries, flat_vis)
-
-        # Reshape the flat masks back into a 3D grid per prompt token
-        mask_logits = mask_logits_flat.view(B, N_T, D, H, W) # Shape: [B, N_T, D, H, W]
+        mask_logits = (projected_queries @ flat_vis) * self.scale
+        mask_logits = mask_logits.view(B, -1, D, H, W)
 
         return modulated_vis, mask_logits
 
 
 class Decoder(nn.Module):
+    """3D upsampling decoder with per-scale vision-language fusion.
+
+    Parameters
+    ----------
+    channels:
+        The same channel list passed to ``Encoder``.  The last entry is the
+        bottleneck width; the preceding entries are the skip widths (shallowest
+        to deepest).
+    query_dim:
+        Dimension of the aligned language queries (model ``embed_dim``).
+
+    Forward
+    -------
+    fused_bottleneck : [B, channels[-1], D_b, H_b, W_b]
+        Output of ``CrossVolumeAttention`` (aligned multi-modal bottleneck).
+    skips : list of Tensors [shallowest … deepest]
+        Skip connections from the primary encoder.
+    aligned_queries : [B, N_T, query_dim]
+        Language-aligned tokens from ``PromptDecoder``.
+
+    Returns
+    -------
+    stage_predictions : list of 3 Tensors
+        [0] ``[B, N_T, D//4, H//4, W//4]``  (lowest resolution)
+        [1] ``[B, N_T, D//2, H//2, W//2]``
+        [2] ``[B, N_T, D,    H,    W   ]``  (full resolution)
     """
-    3D Upsampling Decoder with Hierarchical Vision-Language Fusion.
-    Collects masks at each resolution scale to support Deep Supervision training.
-    """
-    def __init__(self, channels=[16, 32, 64, 128], query_dim=128):
+
+    def __init__(
+        self,
+        channels: Optional[List[int]] = None,
+        query_dim: int = 128,
+    ) -> None:
         super().__init__()
-        
-        # List of skip channels from your T1 Encoder: [16, 32, 64]
-        skip_channels = channels[:-1] # [16, 32, 64]
-        
-        # Re-verify channels backwards
+
+        if channels is None:
+            channels = [16, 32, 64, 128]
+
+        skip_channels = channels[:-1]  # [16, 32, 64] for default config
+
         self.up_blocks = nn.ModuleList()
         self.fusion_blocks = nn.ModuleList()
-        
-        # We build the stages going from Bottleneck (128 channels) up to Stem (16 channels)
-        # Stage 1: Bottleneck (128 channels) -> Out: 64 channels
-        # Stage 2: 64 channels -> Out: 32 channels
-        # Stage 3: 32 channels -> Out: 16 channels
-        in_ch = channels[-1] # 128
-        
-        for skip_ch in reversed(skip_channels): # [64, 32, 16]
-            # Standard 3D Convolution to merge upsampled features and skip connections
-            conv_block = nn.Sequential(
-                nn.Conv3d(in_ch + skip_ch, skip_ch, kernel_size=3, stride=1, padding=1, bias=False),
-                nn.InstanceNorm3d(skip_ch),
-                nn.ReLU()
-            )
-            self.up_blocks.append(conv_block)
-            
-            # Stage-specific vision-language fusion block
-            self.fusion_blocks.append(StageVLFusionBlock(visual_channels=skip_ch, query_dim=query_dim))
-            
-            in_ch = skip_ch # Next input is current output
 
-    def forward(self, fused_bottleneck, skips, aligned_queries):
-        # fused_bottleneck: Shape [B, 128, D_b, H_b, W_b] -> (Stage 3 Bottleneck output)
-        # skips:            List of T1 skip connections: [Skip1 (16), Skip2 (32), Skip3 (64)]
-        # aligned_queries:  Shape [B, N_T, 128]
-        
+        in_ch = channels[-1]
+        for skip_ch in reversed(skip_channels):
+            self.up_blocks.append(
+                nn.Sequential(
+                    nn.Conv3d(in_ch + skip_ch, skip_ch, kernel_size=3, stride=1, padding=1, bias=False),
+                    nn.InstanceNorm3d(skip_ch),
+                    nn.ReLU(inplace=True),
+                )
+            )
+            self.fusion_blocks.append(
+                StageVLFusionBlock(visual_channels=skip_ch, query_dim=query_dim)
+            )
+            in_ch = skip_ch
+
+    def forward(
+        self,
+        fused_bottleneck: torch.Tensor,
+        skips: List[torch.Tensor],
+        aligned_queries: torch.Tensor,
+    ) -> List[torch.Tensor]:
         dec_features = fused_bottleneck
-        stage_predictions = [] # List to hold intermediate masks for Deep Supervision
+        stage_predictions: List[torch.Tensor] = []
 
-        # We reverse the skip list: [Skip3 (64), Skip2 (32), Skip1 (16)]
-        skips_reversed = list(reversed(skips))
-
-        for s in range(len(self.up_blocks)):
-            skip = skips_reversed[s]
-            
-            # 1. Trilinear upsample previous resolution features to match the skip connection shape
+        # Reverse skips: from deepest → shallowest to match upsampling order
+        for skip, up_block, fusion_block in zip(
+            reversed(skips), self.up_blocks, self.fusion_blocks
+        ):
             dec_features = F.interpolate(
-                dec_features, 
-                size=skip.shape[2:], 
-                mode='trilinear', 
-                align_corners=True
+                dec_features,
+                size=skip.shape[2:],
+                mode="trilinear",
+                align_corners=True,
             )
-            
-            # 2. Concatenate upsampled features with T1 skip connection
-            # dec_features shape: [B, in_ch + skip_ch, D, H, W]
-            dec_features = torch.cat([dec_features, skip], dim=1)
-            
-            # 3. Blend channels using 3D Convolutions
-            dec_features = self.up_blocks[s](dec_features) # Shape: [B, skip_ch, D, H, W]
-            
-            # 4. Apply Channel Modulation and project the intermediate 3D mask
-            dec_features, mask_logits = self.fusion_blocks[s](dec_features, aligned_queries)
-            
-            # 5. Save intermediate logits for training with Deep Supervision Loss
+            dec_features = up_block(torch.cat([dec_features, skip], dim=1))
+            dec_features, mask_logits = fusion_block(dec_features, aligned_queries)
             stage_predictions.append(mask_logits)
 
-        # Returns a list of intermediate 3D probability volumes:
-        # stage_predictions[0]: Shape [B, N_T, D//4, H//4, W//4] (Lowest res)
-        # stage_predictions[1]: Shape [B, N_T, D//2, H//2, W//2] (Middle res)
-        # stage_predictions[2]: Shape [B, N_T, D, H, W]         (Original resolution)
         return stage_predictions
