@@ -63,7 +63,7 @@ Filenames on disk follow `data.modalities.primary` / `secondary` (and `data.volu
 
 | Mode | Behavior |
 |------|----------|
-| `training=True` | One crop per subject per `__getitem__`; 50/50 chance of centering on a positive voxel (`patch.positive_ratio`) vs a random valid center |
+| `training=True` | `train_patches_per_subject` crops per subject per epoch; 50/50 chance of centering on a positive voxel (`patch.positive_ratio`) vs a random valid center |
 | `training=False` | `val_patches_per_subject` frozen centers per subject (seeded by `splits.seed`); stable across epochs |
 
 Each item is `(primary, secondary, text_embeddings, gt_mask)`:
