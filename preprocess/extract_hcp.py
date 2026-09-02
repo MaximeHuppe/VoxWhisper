@@ -1,17 +1,18 @@
 # preprocess/extract_hcp.py
-"""Download HCP structural volumes listed in config (T1/T2 by default)."""
+"""Download HCP structural and diffusion volumes for subjects already in the raw folder."""
 from __future__ import annotations
 
-import glob
 import os
 import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
+from threading import Lock
 
 import boto3
 from boto3.s3.transfer import TransferConfig
 from botocore.exceptions import ClientError, NoCredentialsError
 from tqdm import tqdm
 
-# Allow imports from project root when run as a script
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from src.utils.config import (  # noqa: E402
@@ -28,139 +29,165 @@ S3_TRANSFER_CONFIG = TransferConfig(
     use_threads=True,
 )
 
+DIFFUSION_FILES = ("data.nii.gz", "bvals", "bvecs", "nodif_brain_mask.nii.gz")
 
-class S3TransferProgressBar:
-    """Dynamic progress bar hook for boto3 s3 transfers."""
-
-    def __init__(self, filename, size_in_bytes):
-        self._filename = filename
-        self._size = size_in_bytes
-        self._seen_so_far = 0
-        self._pbar = tqdm(
-            total=self._size,
-            unit="B",
-            unit_scale=True,
-            desc=f"Downloading {os.path.basename(filename)}",
-            leave=True,
-        )
-
-    def __call__(self, bytes_amount):
-        self._seen_so_far += bytes_amount
-        self._pbar.update(bytes_amount)
-        if self._seen_so_far >= self._size:
-            self._pbar.close()
+_print_lock = Lock()
 
 
-def get_subjects_from_masks(mask_dir):
-    subjects = []
-    if not os.path.exists(mask_dir):
+# ---------------------------------------------------------------------------
+# Subject discovery
+# ---------------------------------------------------------------------------
+
+def get_subjects_from_raw(raw_dir: str | Path) -> list[str]:
+    """Return 6-digit subject IDs that already have a folder under raw_dir."""
+    raw_dir = Path(raw_dir)
+    if not raw_dir.exists():
         return []
-
-    for item in os.listdir(mask_dir):
-        item_path = os.path.join(mask_dir, item)
-        if os.path.isdir(item_path) and item.isdigit() and len(item) == 6:
-            subjects.append(item)
-
-    recursive_pattern = os.path.join(mask_dir, "**/*.nii.gz")
-    mask_files = glob.glob(recursive_pattern, recursive=True)
-
-    for filepath in mask_files:
-        path_segments = filepath.split(os.sep)
-        for segment in path_segments:
-            if segment.isdigit() and len(segment) == 6:
-                subjects.append(segment)
-
-        filename = os.path.basename(filepath)
-        potential_id = filename.split(".")[0].split("_")[0]
-        if potential_id.isdigit() and len(potential_id) == 6:
-            subjects.append(potential_id)
-
-    return sorted(list(set(subjects)))
+    return sorted(
+        d for d in os.listdir(raw_dir)
+        if (raw_dir / d).is_dir() and d.isdigit() and len(d) == 6
+    )
 
 
-def download_file_with_progress(s3_client, bucket, key, local_path):
-    """Fetch file size, initialize a progress bar, and download in parallel."""
+# ---------------------------------------------------------------------------
+# Per-file download
+# ---------------------------------------------------------------------------
+
+def _make_s3_client():
+    return boto3.client("s3", region_name="us-east-1")
+
+
+def download_file(s3_client, bucket: str, key: str, local_path: str) -> bool:
+    """Download one S3 object; skip silently if the local file already exists."""
+    if Path(local_path).exists():
+        return True
+
     os.makedirs(os.path.dirname(local_path), exist_ok=True)
-
     try:
-        response = s3_client.head_object(
-            Bucket=bucket,
-            Key=key,
-            RequestPayer="requester",
-        )
-        file_size = response["ContentLength"]
-        progress_callback = S3TransferProgressBar(local_path, file_size)
+        head = s3_client.head_object(Bucket=bucket, Key=key, RequestPayer="requester")
+        size = head["ContentLength"]
 
+        pbar = tqdm(
+            total=size, unit="B", unit_scale=True,
+            desc=os.path.basename(local_path), leave=False,
+        )
         s3_client.download_file(
-            Bucket=bucket,
-            Key=key,
-            Filename=local_path,
+            Bucket=bucket, Key=key, Filename=local_path,
             ExtraArgs={"RequestPayer": "requester"},
             Config=S3_TRANSFER_CONFIG,
-            Callback=progress_callback,
+            Callback=lambda n: pbar.update(n),
         )
-    except ClientError as e:
-        print(f"Error downloading {key}: {e}")
+        pbar.close()
+        return True
+    except ClientError as exc:
+        with _print_lock:
+            tqdm.write(f"  [WARN] {key}: {exc}")
+        return False
 
+
+# ---------------------------------------------------------------------------
+# Per-subject download (runs in worker thread — creates its own boto3 client)
+# ---------------------------------------------------------------------------
+
+def download_subject(
+    bucket: str,
+    prefix: str,
+    sub: str,
+    target_dir: str,
+    modalities: list[str],
+    volumes_cfg: dict,
+) -> tuple[str, list[str]]:
+    """Download all requested modalities for one subject. Returns (sub, failed_files)."""
+    s3 = _make_s3_client()
+    failed: list[str] = []
+
+    for modality in modalities:
+        if modality == "diffusion":
+            for fname in DIFFUSION_FILES:
+                key = f"{prefix}/{sub}/T1w/Diffusion/{fname}"
+                local = os.path.join(target_dir, sub, "Diffusion", fname)
+                if not download_file(s3, bucket, key, local):
+                    failed.append(fname)
+        else:
+            if modality not in volumes_cfg:
+                with _print_lock:
+                    tqdm.write(f"  [WARN] modality '{modality}' not in config; skipping.")
+                continue
+            fname = volumes_cfg[modality]["filename"]
+            key = f"{prefix}/{sub}/T1w/{fname}"
+            local = os.path.join(target_dir, sub, fname)
+            if not download_file(s3, bucket, key, local):
+                failed.append(fname)
+
+    return sub, failed
+
+
+# ---------------------------------------------------------------------------
+# Orchestrator
+# ---------------------------------------------------------------------------
 
 def download_hcp_dataset(config):
-    mask_dir = resolve_path(config, "data.paths.raw_masks")
-    target_dir = resolve_path(config, "data.paths.raw")
-    ensure_dir(target_dir)
+    target_dir = str(ensure_dir(resolve_path(config, "data.paths.raw")))
 
     download_cfg = config["data"]["download"]
-    volumes_cfg = config["data"]["volumes"]
-    modalities = download_cfg.get("modalities", ["t1", "t2"])
-    bucket_name = download_cfg["bucket"]
-    dataset_prefix = download_cfg["dataset_prefix"]
+    volumes_cfg  = config["data"].get("volumes", {})
+    modalities   = download_cfg.get("modalities", ["diffusion"])
+    bucket       = download_cfg["bucket"]
+    prefix       = download_cfg["dataset_prefix"]
+    max_workers  = int(download_cfg.get("max_workers", 8))
 
-    subjects = get_subjects_from_masks(str(mask_dir))
+    subjects = get_subjects_from_raw(target_dir)
     if not subjects:
-        print(f"Error: No valid subject masks found in {mask_dir}")
-        print("Please download and extract the OpticNerveSeg masks to that directory first.")
-        sys.exit(1)
+        print(f"No subject folders found in {target_dir}. Nothing to download.")
+        sys.exit(0)
 
-    print(f"Detected {len(subjects)} subjects with valid masks in raw_masks.")
+    if download_cfg.get("limit_subjects"):
+        subjects = subjects[: int(download_cfg.get("limit_count", 10))]
 
-    if download_cfg.get("limit_subjects", False):
-        limit_count = int(download_cfg.get("limit_count", 10))
-        subjects = subjects[:limit_count]
-        print(f"Limiting download to the first {len(subjects)} subjects.")
+    print(f"Subjects to process : {len(subjects)}")
+    print(f"Modalities          : {modalities}")
+    print(f"Parallel workers    : {max_workers}")
 
+    # Validate AWS credentials once before spawning workers
     try:
-        s3 = boto3.client("s3", region_name="us-east-1")
-        # Validate credentials early
-        s3.list_buckets()
+        boto3.client("s3", region_name="us-east-1").list_buckets()
     except NoCredentialsError:
         print(
             "Error: AWS credentials not found.\n"
-            "Configure them via ~/.aws/credentials or AWS_ACCESS_KEY_ID / "
-            "AWS_SECRET_ACCESS_KEY environment variables."
+            "Configure them via ~/.aws/credentials or the "
+            "AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY environment variables."
         )
         sys.exit(1)
     except ClientError:
-        # list_buckets may fail for restricted keys; still attempt downloads
-        s3 = boto3.client("s3", region_name="us-east-1")
+        pass  # Restricted key — still valid, proceed
 
-    for sub in subjects:
-        print("==========================================")
-        print(f"Downloading Subject: {sub}")
-        print("==========================================")
+    failed_subjects: dict[str, list[str]] = {}
 
-        for modality in modalities:
-            if modality not in volumes_cfg:
-                print(f"Warning: modality '{modality}' missing from data.volumes; skipping.")
-                continue
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = {
+            pool.submit(
+                download_subject,
+                bucket, prefix, sub, target_dir, modalities, volumes_cfg,
+            ): sub
+            for sub in subjects
+        }
+        with tqdm(total=len(subjects), desc="Subjects", unit="sub") as pbar:
+            for future in as_completed(futures):
+                sub, failed = future.result()
+                if failed:
+                    failed_subjects[sub] = failed
+                pbar.update(1)
+                pbar.set_postfix(failed=len(failed_subjects))
 
-            filename = volumes_cfg[modality]["filename"]
-            s3_key = f"{dataset_prefix}/{sub}/T1w/{filename}"
-            local_path = os.path.join(str(target_dir), sub, "T1w", filename)
-            download_file_with_progress(s3, bucket_name, s3_key, local_path)
-
-    print("\nMultimodal download process completed.")
+    if failed_subjects:
+        print(f"\nWarning: {len(failed_subjects)} subject(s) had download errors:")
+        for sub, files in failed_subjects.items():
+            print(f"  {sub}: {files}")
+    else:
+        print("\nAll downloads completed successfully.")
 
 
 if __name__ == "__main__":
-    args = parse_config_args(description="Download HCP T1/T2 volumes")
+    args = parse_config_args(description="Download HCP structural/diffusion volumes")
     cfg = load_config(args.config)
     download_hcp_dataset(cfg)

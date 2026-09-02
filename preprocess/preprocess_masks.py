@@ -17,6 +17,7 @@ from src.utils.config import (  # noqa: E402
     load_structures,
     parse_config_args,
     resolve_path,
+    active_modality_keys,
 )
 from src.utils.nifti_io import (  # noqa: E402
     mask_path,
@@ -61,13 +62,14 @@ def process_mask(subject_id, raw_dir, output_dir, config, structures):
     print(f"Processing tract masks: {subject_id}")
 
     # 1. Load T1 reference volume
-    t1_cfg = config["data"]["volumes"]["t1"]
-    t1_path = resolve_raw_volume_path(raw_dir, subject_id, t1_cfg["filename"])
-    if t1_path is None:
+    primary, _ = active_modality_keys(config)
+    primary_cfg = config["data"]["volumes"][primary]
+    primary_path = resolve_raw_volume_path(raw_dir, subject_id, primary_cfg["filename"])
+    if primary_path is None:
         print(f"Warning: T1 reference missing for {subject_id}. Skipping.")
         return
 
-    t1_img = nib.load(str(t1_path))
+    t1_img = nib.load(str(primary_path))
 
     # 2. Create integer label map
     label_data = np.zeros(t1_img.shape[:3], dtype=np.uint8)

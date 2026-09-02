@@ -58,7 +58,8 @@ def cache_embedding(prompt_list, output_path, model_name):
         # MEAN POOLING: Average along the Seq_Len dimension (dim=1)
         # This reduces the shape of each phrase to a single 768-dimensional vector
         # Shape transition: [Num_Phrases, Seq_Len, 768] -> [Num_Phrases, 768]
-        embeddings = token_embeddings.mean(dim=1)
+        mask = inputs["attention_mask"].unsqueeze(-1).float()  # [N, L, 1]
+        embeddings = (token_embeddings * mask).sum(dim=1) / mask.sum(dim=1)
 
     # 6. Save the embeddings to disk
     ensure_dir(output_path.parent)
