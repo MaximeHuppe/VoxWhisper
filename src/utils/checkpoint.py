@@ -98,7 +98,12 @@ def qualifies_for_topk(score, ranked_scores, k, higher_is_better) -> bool:
 
 
 class TopKCheckpoints:
-    """Keep the best ``k`` checkpoints on disk for the configured monitor."""
+    """Keep the best ``k`` checkpoints on disk for the configured monitor.
+
+    State is persisted to ``vox_whisper_topk.json`` after every update so it
+    can be restored when training resumes.  Call ``restore_from_manifest()``
+    before the first epoch to pick up where a previous run left off.
+    """
 
     def __init__(self, k: int, cache_dir):
         self.k = k
@@ -106,6 +111,42 @@ class TopKCheckpoints:
         self.entries: list[dict] = []
         self.higher_is_better: bool | None = None
         self.metric_name: str | None = None
+
+    def restore_from_manifest(self) -> int:
+        """Repopulate state from an existing manifest written by a previous run.
+
+        Only entries whose ``.pt`` file still exists on disk are kept.
+        Returns the number of entries successfully restored (0 when the
+        manifest is absent or empty).
+        """
+        manifest = self.cache_dir / "vox_whisper_topk.json"
+        if not manifest.exists():
+            return 0
+
+        try:
+            payload = json.loads(manifest.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return 0
+
+        self.metric_name = payload.get("monitor")
+        self.higher_is_better = payload.get("higher_is_better")
+
+        restored = []
+        for entry in payload.get("entries", []):
+            pt_path = self.cache_dir / entry["file"]
+            if pt_path.exists():
+                restored.append({
+                    "score": float(entry["score"]),
+                    "epoch": int(entry["epoch"]),
+                    "path": pt_path,
+                })
+
+        self.entries = sorted(
+            restored,
+            key=lambda e: e["score"],
+            reverse=bool(self.higher_is_better),
+        )
+        return len(self.entries)
 
     def update(self, score, higher_is_better: bool, metric_name: str, epoch: int, save_fn):
         """

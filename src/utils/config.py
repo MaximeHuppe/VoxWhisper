@@ -95,6 +95,7 @@ def load_structures(config: Mapping[str, Any]) -> Optional[dict[str, Any]]:
     foreground = [(name, v["label"]) for name, v in items if v["label"] != 0]
     return {
         "prompts": [v["prompt"] for _, v in items],
+        "structure_names": [name for name, _ in items],
         "positive_labels": [label for _, label in foreground],
         "foreground": foreground,
     }
@@ -104,6 +105,7 @@ def _apply_structures(config: dict[str, Any]) -> None:
     if not structs:
         return
     config.setdefault("data", {})["prompts"] = structs["prompts"]
+    config["data"]["structure_names"] = structs["structure_names"]
     config["data"].setdefault("patch", {})["positive_labels"] = structs["positive_labels"]
 
 

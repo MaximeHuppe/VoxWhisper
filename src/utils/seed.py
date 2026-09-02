@@ -29,6 +29,8 @@ def set_global_seed(seed: int) -> torch.Generator:
     return generator
 
 
-def worker_init_fn(worker_id: int, base_seed: int) -> None:
-    """Per-worker seed for DataLoader subprocesses (``base_seed + worker_id``)."""
-    np.random.seed(base_seed + worker_id)
+def worker_init_fn(worker_id, base_seed):
+    seed = base_seed + worker_id
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
