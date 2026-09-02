@@ -9,7 +9,7 @@ import torch.nn as nn
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.infer import SlidingWindowPredictor, predict_full_volume
-from src.utils.metrics import per_class_dice
+from src.training.metrics import per_class_dice
 
 
 class _IdentityNet(nn.Module):
@@ -135,3 +135,28 @@ def test_checkpoint_epoch_numeric_not_lexicographic():
     assert _checkpoint_epoch(Path("vox_whisper_epoch_9.pt")) < _checkpoint_epoch(
         Path("vox_whisper_epoch_10.pt")
     )
+
+
+def test_resolve_checkpoint_from_run_layout(tmp_path):
+    from pipeline.evaluate import resolve_checkpoint
+    from src.utils.run import create_run_dir
+
+    cfg = {
+        "data": {
+            "paths": {
+                "processed": str(tmp_path / "processed_T1_FA"),
+                "runs": str(tmp_path / "runs"),
+                "cache": str(tmp_path / "cache"),
+            },
+            "modalities": {"primary": "t1", "secondary": "fa"},
+        },
+        "training": {"run_name": "baseline"},
+        "inference": {"checkpoint": None},
+    }
+    run_dir = create_run_dir(cfg, timestamp="20260902_170000")
+    (run_dir / "vox_whisper_best.pt").write_bytes(b"best")
+    (run_dir / "vox_whisper_latest.pt").write_bytes(b"latest")
+
+    assert resolve_checkpoint(cfg, None).name == "vox_whisper_best.pt"
+    assert resolve_checkpoint(cfg, None, run_dir=str(run_dir)).name == "vox_whisper_best.pt"
+

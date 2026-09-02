@@ -3,26 +3,37 @@
 data:
   paths:
     raw: data/raw
-    processed: data/processed
-    cache: cache
+    processed: data/processed_T1_FA
+    cache: cache                 # shared artifacts (prompt embeddings)
+    runs: runs                   # training outputs: runs/{processed_leaf}/{run_name}/{timestamp}/
 
   modalities:
     primary: t1
-    secondary: t2
+    secondary: fa
 
   volumes:
     t1:
-      filename: T1w_acpc_dc_restore.nii.gz
+      filename: T1w_acpc_dc_restore_1.25.nii.gz
     t2:
       filename: T2w_acpc_dc_restore.nii.gz
+    b0:
+      filename: average_b0.nii.gz
+    fa:
+      filename: dti_FA.nii.gz
 
   masks:
     source: tract_masks_1.25
     structures: config/structures.json
 
+  download:
+    modalities: ["diffusion"] # Or ["t1", "t2", "diffusion"]
+    bucket: "hcp-openaccess"
+    dataset_prefix: "HCP_1200"
+
   patch:
     size: [128, 128, 128]
     positive_ratio: 0.5
+    train_patches_per_subject: 4
     val_patches_per_subject: 4
 
   mock_volume_shape: [192, 192, 192]
@@ -51,18 +62,20 @@ model:
     num_resblocks: [1, 1, 1]
   
 training:
+  run_name: baseline         # folder under runs/{processed_leaf}/; override with --name
   seed: 42
   batch_size: 2
   epochs: 150
   learning_rate: 0.00005
+  bce_pos_weight: 20         # foreground BCE weight; background stays 1
   deep_supervision_weights: [0.1, 0.3, 0.6]
   checkpoint:
     monitor: dice          # loss | dice
-    dice_scope: patch      # patch | volume (only if monitor=dice)
+    dice_scope: volume      # patch | volume (only if monitor=dice)
     keep: 3                # top-k by monitor (highest dice / lowest loss)
     every: 10              # write vox_whisper_epoch_N.pt every N epochs
-    volume_every: 10       # full-volume Dice every N epochs (dice_scope=volume)
-    keep_periodic: true
+    volume_every: 5       # full-volume Dice every N epochs (dice_scope=volume)
+    keep_periodic: false
   dataloader:
     shuffle: true
     drop_last: true

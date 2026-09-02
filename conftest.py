@@ -31,7 +31,7 @@ def base_config() -> dict:
             "paths": {
                 "processed": "",          # overridden per-test via tmp_config
                 "raw": "",
-                "checkpoints": "",
+                "runs": "",
                 "splits": "",
                 "cache": "",
             },
@@ -48,6 +48,7 @@ def base_config() -> dict:
         },
         "splits": {"enabled": False},
         "training": {
+            "run_name": "test",
             "epochs": 2,
             "batch_size": 1,
             "learning_rate": 1e-4,
@@ -102,7 +103,7 @@ def tmp_config(tmp_path: Path, base_config: dict) -> dict:
     cfg = copy.deepcopy(base_config)
     cfg["data"]["paths"]["processed"] = str(tmp_path / "processed")
     cfg["data"]["paths"]["raw"] = str(tmp_path / "raw")
-    cfg["data"]["paths"]["checkpoints"] = str(tmp_path / "checkpoints")
+    cfg["data"]["paths"]["runs"] = str(tmp_path / "runs")
     cfg["data"]["paths"]["splits"] = str(tmp_path / "splits")
     cfg["data"]["paths"]["cache"] = str(tmp_path / "cache")
     cfg["model"]["text_encoder"]["cache_path"] = str(tmp_path / "cache" / "embeddings.pt")

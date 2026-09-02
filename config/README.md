@@ -5,6 +5,7 @@ Main file: [`tracts.yaml`](tracts.yaml). Structure names and clinical phrases: [
 Load with `src.utils.config.load_config(path)`. Relative paths are resolved from the repo root. When `data.masks.structures` is set, `load_config` injects:
 
 - `data.prompts` — ordered prompt strings (including background)
+- `data.structure_names` — ordered structure keys from `structures.json` (including background)
 - `data.patch.positive_labels` — foreground label ids used for positive patch sampling
 
 ## `structures.json`
@@ -25,8 +26,9 @@ Order of channels follows ascending `label`. Foreground entries without a matchi
 | Key | Meaning |
 |-----|---------|
 | `raw` | Root of raw subject folders (HCP-style) |
-| `processed` | Output of volume/mask preprocess; also training input |
-| `cache` | Checkpoints, prompt `.pt` cache, top-k manifests |
+| `processed` | Output of volume/mask preprocess; also training input. The leaf name (e.g. `processed_T1_FA`) becomes the dataset folder under `runs/` |
+| `cache` | Shared artifacts only (prompt `.pt` embeddings) |
+| `runs` | Root for training outputs: `{runs}/{processed_leaf}/{run_name}/{timestamp}/` |
 
 ### `data.modalities`
 
@@ -58,6 +60,7 @@ These keys must match entries under `data.volumes` and become filenames `{key}.n
 |-----|---------|
 | `size` | Train / sliding-window crop size `[D, H, W]` |
 | `positive_ratio` | Probability of sampling a crop centered on a positive voxel (train); also drives val mix |
+| `train_patches_per_subject` | Independent random crops per subject per training epoch |
 | `val_patches_per_subject` | Frozen crops per subject in val/test |
 | `positive_labels` | Injected from structures (do not edit by hand if using `structures.json`) |
 
@@ -102,10 +105,12 @@ Bottleneck spatial size is `patch.size` divided by the product of `strides` (e.g
 
 | Key | Meaning |
 |-----|---------|
+| `run_name` | Experiment folder under `runs/{processed_leaf}/` (filesystem-safe). Override per launch with `--name` |
 | `seed` | Global RNG + train patch sampling |
 | `batch_size` | Patches per step |
 | `epochs` | Cosine schedule `T_max` |
 | `learning_rate` | AdamW LR |
+| `bce_pos_weight` | BCE positive-class weight. Scalar: background=1, all tracts=`w`. Or a length-`N_T` list. `1` / omitted = unweighted |
 | `deep_supervision_weights` | Weight per decoder stage (coarse → fine); length must match decoder stages |
 | `dataloader.shuffle` | Shuffle train loader |
 | `dataloader.drop_last` | Drop incomplete train batches |

@@ -12,9 +12,9 @@ logging.basicConfig(
 import torch
 from torch.utils.data import DataLoader
 
-from src.dataset import VoxWhisperDataset
+from src.data.dataset import VoxWhisperDataset
 from src.models.vox_whisper import VoxWhisper
-from src.utils.checkpoint import (
+from src.training.checkpoint import (
     TopKCheckpoints,
     checkpoint_config,
     describe_monitor,
@@ -24,16 +24,13 @@ from src.utils.checkpoint import (
     should_eval_volume,
     should_save_periodic,
 )
-from src.utils.config import (
-    ensure_dir,
-    load_config,
-    resolve_path,
-)
-from src.utils.logger import TrainingLogger
-from src.utils.metrics import DiceBCELoss, deep_supervision_loss
+from src.utils.config import load_config
+from src.training.logger import TrainingLogger
+from src.training.metrics import DiceBCELoss, deep_supervision_loss
+from src.utils.run import create_or_resume_run
 from src.utils.seed import get_training_seed, set_global_seed, worker_init_fn
-from src.utils.splits import create_or_load_splits
-from src.utils.validate import evaluate_patches, evaluate_volume_dice
+from src.data.splits import create_or_load_splits
+from src.training.validate import evaluate_patches, evaluate_volume_dice
 
 # Maximum gradient norm for clipping.  MHA-heavy architectures can produce
 # large gradient spikes early in training; clipping improves stability without
@@ -95,13 +92,13 @@ def build_loaders(config: dict, seed: int):
     return train_loader, None
 
 
-def _load_resume_state(cache_dir, model, optimizer, scheduler):
+def _load_resume_state(run_dir, model, optimizer, scheduler):
     """Load the latest checkpoint and fast-forward the scheduler.
 
     Returns the epoch to resume from (1-based, i.e. training continues at
     epoch ``start_epoch + 1``).  Returns 0 when no checkpoint is found.
     """
-    latest = cache_dir / "vox_whisper_latest.pt"
+    latest = run_dir / "vox_whisper_latest.pt"
     if not latest.exists():
         print("Warning: --resume requested but no checkpoint found — starting fresh")
         return 0
@@ -121,7 +118,14 @@ def _load_resume_state(cache_dir, model, optimizer, scheduler):
     return start_epoch
 
 
-def train_model(config: dict, resume: bool = False) -> None:
+def train_model(
+    config: dict,
+    resume: bool = False,
+    *,
+    name_override: str | None = None,
+    run_dir: str | None = None,
+    config_path: str | None = None,
+) -> None:
     train_cfg = config["training"]
     seed = get_training_seed(config)
     set_global_seed(seed)
@@ -138,9 +142,15 @@ def train_model(config: dict, resume: bool = False) -> None:
     learning_rate = train_cfg["learning_rate"]
     deep_sup_weights = train_cfg["deep_supervision_weights"]
 
-    cache_dir = resolve_path(config, "data.paths.checkpoints")
-    ensure_dir(cache_dir)
-
+    run_path = create_or_resume_run(
+        config,
+        resume=resume,
+        name_override=name_override,
+        run_dir=run_dir,
+        config_path=config_path,
+        seed=seed,
+    )
+    print(f"Run directory: {run_path}")
     print(f"Training seed: {seed}")
     print(f"Checkpoint monitor: {describe_monitor(ckpt_cfg)}")
     print(f"Device: {device}")
@@ -164,16 +174,16 @@ def train_model(config: dict, resume: bool = False) -> None:
     criterion = DiceBCELoss.from_config(config, n_prompts)
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
-    topk = TopKCheckpoints(k=ckpt_cfg["keep"], cache_dir=cache_dir)
+    topk = TopKCheckpoints(k=ckpt_cfg["keep"], cache_dir=run_path)
 
     start_epoch = 0
     if resume:
-        start_epoch = _load_resume_state(cache_dir, model, optimizer, scheduler)
+        start_epoch = _load_resume_state(run_path, model, optimizer, scheduler)
         restored = topk.restore_from_manifest()
         if restored:
             print(f"Restored {restored} top-k checkpoint entries from manifest")
 
-    with TrainingLogger(cache_dir, total_epochs=epochs, resume=resume) as logger:
+    with TrainingLogger(run_path, total_epochs=epochs, resume=resume) as logger:
         for epoch in range(start_epoch, epochs):
             model.train()
             epoch_loss = 0.0
@@ -243,7 +253,7 @@ def train_model(config: dict, resume: bool = False) -> None:
                 if score is not None else None
             )
             save_checkpoint(
-                cache_dir / "vox_whisper_latest.pt",
+                run_path / "vox_whisper_latest.pt",
                 epoch + 1,
                 model,
                 optimizer,
@@ -253,7 +263,7 @@ def train_model(config: dict, resume: bool = False) -> None:
             )
 
             if should_save_periodic(epoch, ckpt_cfg):
-                checkpoint_path = cache_dir / f"vox_whisper_epoch_{epoch + 1}.pt"
+                checkpoint_path = run_path / f"vox_whisper_epoch_{epoch + 1}.pt"
                 save_checkpoint(checkpoint_path, epoch + 1, model, optimizer, metrics, config)
                 print(f"Saved periodic checkpoint: {checkpoint_path.name}")
 
@@ -268,13 +278,30 @@ if __name__ == "__main__":
         help="Path to YAML config (relative to project root or absolute)",
     )
     parser.add_argument(
+        "--name",
+        default=None,
+        help="Override training.run_name for this launch (folder under runs/{dataset}/)",
+    )
+    parser.add_argument(
+        "--run-dir",
+        default=None,
+        help="Use an existing timestamped run directory (with or without --resume)",
+    )
+    parser.add_argument(
         "--resume",
         action="store_true",
         help=(
-            "Resume from vox_whisper_latest.pt in the checkpoint directory. "
-            "If no checkpoint exists, training starts from scratch with a warning."
+            "Resume from vox_whisper_latest.pt in the newest run under "
+            "runs/{dataset}/{run_name}/ (or --run-dir). "
+            "If no checkpoint exists, training starts a new run with a warning."
         ),
     )
     args = parser.parse_args()
     cfg = load_config(args.config)
-    train_model(cfg, resume=args.resume)
+    train_model(
+        cfg,
+        resume=args.resume,
+        name_override=args.name,
+        run_dir=args.run_dir,
+        config_path=args.config,
+    )

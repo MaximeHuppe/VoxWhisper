@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 from pathlib import Path
 
 import numpy as np
@@ -15,16 +16,21 @@ from src.infer import (
     volumes_to_tensors,
 )
 from src.models.vox_whisper import VoxWhisper
-from src.utils.checkpoint import load_model_state
+from src.training.checkpoint import load_model_state
 from src.utils.config import (
     ensure_dir,
     get_project_root,
     load_config,
     resolve_path,
 )
-from src.utils.metrics import channel_dice_from_logits, per_class_dice
-from src.utils.nifti_io import label_to_multichannel, list_subject_ids, save_nifti
-from src.utils.splits import create_or_load_splits
+from src.training.metrics import channel_dice_from_logits, per_class_dice
+from src.data.nifti_io import label_to_multichannel, list_subject_ids, save_nifti
+from src.utils.run import (
+    find_checkpoint_for_eval,
+    predictions_dir,
+    resolve_run_dir_for_eval,
+)
+from src.data.splits import create_or_load_splits
 
 
 def parse_args():
@@ -40,8 +46,23 @@ def parse_args():
     parser.add_argument(
         "--checkpoint",
         type=str,
-        default="cache/baseline_T1_B0/vox_whisper_top1.pt",
-        help="Path to a training checkpoint (.pt). Defaults to the latest in cache/",
+        default=None,
+        help=(
+            "Path to a training checkpoint (.pt). "
+            "Defaults to the latest run under runs/{dataset}/{run_name}/"
+        ),
+    )
+    parser.add_argument(
+        "--run-dir",
+        type=str,
+        default=None,
+        help="Timestamped run directory; picks best/top1/latest checkpoint inside it",
+    )
+    parser.add_argument(
+        "--name",
+        type=str,
+        default=None,
+        help="Override training.run_name when auto-discovering the latest run",
     )
     parser.add_argument(
         "--split",
@@ -53,8 +74,11 @@ def parse_args():
     parser.add_argument(
         "--output-dir",
         type=str,
-        default="output",
-        help="Directory for predicted NIfTIs (default: inference.output_dir)",
+        default=None,
+        help=(
+            "Override output directory for predicted NIfTIs and CSVs. "
+            "Default: {run_dir}/predictions/{split}/ or inference.output_dir"
+        ),
     )
     parser.add_argument(
         "--subject",
@@ -67,34 +91,27 @@ def parse_args():
 
 def _as_path(value: str) -> Path:
     path = Path(value)
-    if path.is_absolute():
-        return path
-    return get_project_root() / path
+    return path if path.is_absolute() else get_project_root() / path
 
 
-def resolve_checkpoint(config, explicit: str | None) -> Path:
+def resolve_checkpoint(
+    config,
+    explicit: str | None,
+    *,
+    run_dir: str | None = None,
+    name_override: str | None = None,
+) -> Path:
+    """Resolve checkpoint: explicit path → run-dir → config inference.checkpoint → latest run."""
     inf_cfg = config.get("inference", {})
-    raw = explicit or inf_cfg.get("checkpoint")
-    if raw:
-        path = _as_path(str(raw))
-        if not path.exists():
-            raise FileNotFoundError(f"Checkpoint not found: {path}")
-        return path
-
-    cache_dir = resolve_path(config, "data.paths.cache")
-    for name in ("vox_whisper_best.pt", "vox_whisper_top1.pt"):
-        preferred = cache_dir / name
-        if preferred.exists():
-            return preferred
-
-    ckpts = list(cache_dir.glob("vox_whisper_epoch_*.pt"))
-    if not ckpts:
-        raise FileNotFoundError(
-            f"No checkpoint given and none found in {cache_dir} "
-            "(expected vox_whisper_best.pt or vox_whisper_epoch_*.pt). "
-            "Train first or pass --checkpoint."
-        )
-    return max(ckpts, key=_checkpoint_epoch)
+    raw = explicit if explicit is not None else inf_cfg.get("checkpoint")
+    if raw in (None, "", "null"):
+        raw = None
+    return find_checkpoint_for_eval(
+        config,
+        explicit=str(raw) if raw else None,
+        run_dir=run_dir,
+        name_override=name_override,
+    )
 
 
 def _checkpoint_epoch(path: Path) -> int:
@@ -228,16 +245,78 @@ def evaluate_subject(
     return metrics
 
 
+def write_dice_tables(
+    output_dir: Path,
+    subjects: list[str],
+    scores: list[np.ndarray],
+    structure_names: list[str],
+) -> None:
+    """Write per-subject and summary Dice CSV tables into ``output_dir``.
+
+    Files written
+    -------------
+    ``dice_per_subject.csv``
+        Rows = subjects, columns = structures (channel Dice, sigmoid threshold).
+
+    ``dice_summary.csv``
+        Rows = structures, columns = mean / std / min / max over the subject set.
+    """
+    arr = np.array(scores)   # [N_subjects, N_structures]
+
+    per_subject_path = output_dir / "dice_per_subject.csv"
+    with open(per_subject_path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(["subject_id"] + structure_names)
+        for sid, row in zip(subjects, arr):
+            writer.writerow([sid] + [f"{v:.4f}" for v in row])
+    print(f"  Saved {per_subject_path.name}")
+
+    summary_path = output_dir / "dice_summary.csv"
+    with open(summary_path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(["structure", "mean", "std", "min", "max"])
+        for i, name in enumerate(structure_names):
+            col = arr[:, i]
+            writer.writerow([
+                name,
+                f"{col.mean():.4f}",
+                f"{col.std():.4f}",
+                f"{col.min():.4f}",
+                f"{col.max():.4f}",
+            ])
+    print(f"  Saved {summary_path.name}")
+
+
 def evaluate(config, args):
     device = pick_device()
     inf_cfg = config.get("inference", {})
-    checkpoint_path = resolve_checkpoint(config, args.checkpoint)
-    output_dir = _as_path(args.output_dir or inf_cfg.get("output_dir", "data/predictions"))
+    split_name = args.split or inf_cfg.get("split", "test")
+
+    # --- resolve run dir and output path ---
+    eval_run_dir = resolve_run_dir_for_eval(
+        config,
+        run_dir=getattr(args, "run_dir", None),
+        name_override=getattr(args, "name", None),
+    )
+    if eval_run_dir is not None:
+        output_dir = predictions_dir(eval_run_dir, split_name)
+    else:
+        output_dir = _as_path(inf_cfg.get("output_dir", "data/predictions"))
+    if getattr(args, "output_dir", None):   # explicit --output-dir always wins
+        output_dir = _as_path(args.output_dir)
     ensure_dir(output_dir)
+
+    checkpoint_path = resolve_checkpoint(
+        config,
+        args.checkpoint,
+        run_dir=getattr(args, "run_dir", None),
+        name_override=getattr(args, "name", None),
+    )
 
     subjects = resolve_subjects(config, args.split, args.subject)
     print(f"Device: {device}")
     print(f"Checkpoint: {checkpoint_path}")
+    print(f"Output: {output_dir}")
     print(f"Subjects ({len(subjects)}): {subjects}")
     print(
         f"Sliding window: roi={tuple(config['data']['patch']['size'])} "
@@ -247,8 +326,9 @@ def evaluate(config, args):
     model = load_model(config, checkpoint_path, device)
     text_embeddings = load_text_embeddings(config, map_location="cpu")
 
-    all_argmax = []
-    all_channel = []
+    subjects_with_gt: list[str] = []
+    all_channel: list[np.ndarray] = []
+    all_argmax: list[np.ndarray] = []
     n_prompts = len(config["data"]["prompts"])
 
     for subject_id in subjects:
@@ -256,27 +336,33 @@ def evaluate(config, args):
             model, config, subject_id, text_embeddings, device, output_dir
         )
         if metrics is not None:
-            all_argmax.append(metrics["argmax"])
+            subjects_with_gt.append(subject_id)
             all_channel.append(metrics["channel"])
+            all_argmax.append(metrics["argmax"])
 
-    if all_argmax:
-        mean_argmax = np.mean(np.asarray(all_argmax), axis=0)
-        mean_channel = np.mean(np.asarray(all_channel), axis=0)
+    if all_channel:
+        arr_ch = np.asarray(all_channel)
+        arr_ax = np.asarray(all_argmax)
         prompts = config["data"]["prompts"]
-        print("Mean Dice across subjects:")
+        structure_names = config["data"].get("structure_names") or prompts
+
+        print("\nMean Dice across subjects:")
+        fg = list(range(1, n_prompts))
         for i, name in enumerate(prompts):
             print(
-                f"  {name:20s}  argmax={mean_argmax[i]:.4f}  "
-                f"channel={mean_channel[i]:.4f}"
+                f"  {name:20s}  argmax={arr_ax[:, i].mean():.4f}  "
+                f"channel={arr_ch[:, i].mean():.4f}"
             )
-        fg = list(range(1, n_prompts))
         if fg:
             print(
-                f"  foreground mean     argmax={mean_argmax[fg].mean():.4f}  "
-                f"channel={mean_channel[fg].mean():.4f}"
+                f"  foreground mean     argmax={arr_ax[:, fg].mean():.4f}  "
+                f"channel={arr_ch[:, fg].mean():.4f}"
             )
 
-    print(f"Wrote predictions to {output_dir}")
+        print("\nWriting result tables:")
+        write_dice_tables(output_dir, subjects_with_gt, all_channel, structure_names)
+
+    print(f"\nWrote predictions to {output_dir}")
 
 
 if __name__ == "__main__":

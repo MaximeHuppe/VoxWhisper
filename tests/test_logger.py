@@ -7,7 +7,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from src.utils.logger import TrainingLogger, _format_class_dice, _jsonify_metric
+from src.training.logger import METRICS_FILENAME, TrainingLogger, _format_class_dice, _jsonify_metric
 
 
 def test_jsonify_nested_class_dice():
@@ -37,9 +37,9 @@ def test_logger_writes_class_dice_dicts(tmp_path, capsys):
     )
     logger.close()
 
-    lines = list(tmp_path.glob("run_*.jsonl"))
-    assert len(lines) == 1
-    record = json.loads(lines[0].read_text().strip())
+    path = tmp_path / METRICS_FILENAME
+    assert path.exists()
+    record = json.loads(path.read_text().strip())
     assert record["dice_patch"] == 0.14
     assert record["dice_patch_classes"]["ATR_left"] == 0.84
 
@@ -53,3 +53,18 @@ def test_logger_writes_class_dice_dicts(tmp_path, capsys):
     resumed.close()
     assert "dice_patch" in bests
     assert "dice_patch_classes" not in bests
+
+
+def test_logger_resume_appends(tmp_path):
+    logger = TrainingLogger(tmp_path, total_epochs=5)
+    logger.log_epoch(1, {"train_loss": 1.0}, lr=1e-4)
+    logger.close()
+
+    resumed = TrainingLogger(tmp_path, total_epochs=5, resume=True)
+    resumed.log_epoch(2, {"train_loss": 0.5}, lr=1e-4)
+    resumed.close()
+
+    lines = (tmp_path / METRICS_FILENAME).read_text().strip().splitlines()
+    assert len(lines) == 2
+    assert json.loads(lines[0])["epoch"] == 1
+    assert json.loads(lines[1])["epoch"] == 2
