@@ -1,4 +1,42 @@
 # pipeline/run_preprocess.py — volumes → masks → prompt embeddings
+"""Full preprocessing pipeline for VoxWhisper.
+
+Pipeline overview
+-----------------
+The steps below must be run in order.  Step 0 is only needed when the
+secondary modality is ``fa``; it is skipped automatically for ``b0``.
+
+Step 0  (optional) — FA map generation
+    ``python preprocess/compute_fa.py --config config/tracts.yaml``
+
+    Reads each subject's 4D diffusion series from
+    ``data/raw/{subject_id}/Diffusion/`` and writes a 3D FA map to
+    ``data/raw/{subject_id}/dti_FA.nii.gz``.  Run this once before Steps 1–4.
+
+    Add ``--delete-raw`` to remove ``Diffusion/data.nii.gz`` afterwards and
+    reclaim ~1–2 GB per subject.  Add ``--workers N`` to parallelise across
+    subjects.
+
+Step 1 — preprocess volumes
+    Loads T1 / B0 / FA from ``data/raw/``, applies z-score normalisation,
+    and writes ``{primary}.nii.gz`` and ``{secondary}.nii.gz`` to the
+    processed directory.
+
+Step 2 — preprocess masks
+    Merges per-tract binary masks from ``tract_masks_1.25/`` into a single
+    integer label map ``mask.nii.gz`` in the processed directory.
+
+Step 3 — drop incomplete subjects
+    Removes processed subjects missing any required file (primary, secondary,
+    mask) to keep the dataset consistent.
+
+Step 4 — cache prompt embeddings
+    Encodes the tract-name prompts with PubMedBERT and writes a ``{}.pt``
+    cache file used by the DataLoader.
+
+This script runs Steps 1–4 in sequence.  Run Step 0 manually beforehand
+when ``data.modalities.secondary: fa`` is set in the config.
+"""
 from __future__ import annotations
 
 import shutil
@@ -42,8 +80,32 @@ def drop_incomplete_processed(config) -> list[str]:
     return removed
 
 
+def _warn_if_fa_needed(config) -> None:
+    """Print a reminder when FA is the secondary modality but no FA maps exist."""
+    _, secondary = active_modality_keys(config)
+    if secondary != "fa":
+        return
+    raw_dir = resolve_path(config, "data.paths.raw")
+    if not raw_dir.is_dir():
+        return
+    subjects = [d for d in raw_dir.iterdir() if d.is_dir() and d.name.isdigit()]
+    missing = [s for s in subjects if not (s / "dti_FA.nii.gz").exists()]
+    if missing:
+        print(
+            f"[Warning] {len(missing)} subject(s) have no dti_FA.nii.gz "
+            f"but secondary modality is 'fa'.  Run Step 0 first:\n"
+            f"  python preprocess/compute_fa.py --config <your_config.yaml>\n"
+        )
+
+
 def run_preprocess(config) -> None:
-    """Normalize volumes, build integer masks, then cache prompt embeddings."""
+    """Run Steps 1–4 of the preprocessing pipeline.
+
+    Step 0 (FA map generation) is optional and must be run separately
+    when ``data.modalities.secondary`` is ``fa``.  See the module docstring
+    for the full pipeline overview.
+    """
+    _warn_if_fa_needed(config)
     print("=== Step 1/4: preprocess volumes ===")
     preprocess_volumes(config)
 

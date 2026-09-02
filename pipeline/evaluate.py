@@ -40,20 +40,20 @@ def parse_args():
     parser.add_argument(
         "--checkpoint",
         type=str,
-        default=None,
+        default="cache/baseline_T1_B0/vox_whisper_top1.pt",
         help="Path to a training checkpoint (.pt). Defaults to the latest in cache/",
     )
     parser.add_argument(
         "--split",
         type=str,
-        default=None,
+        default="test",
         choices=["train", "val", "test"],
         help="Subject split to evaluate (default: inference.split)",
     )
     parser.add_argument(
         "--output-dir",
         type=str,
-        default=None,
+        default="output",
         help="Directory for predicted NIfTIs (default: inference.output_dir)",
     )
     parser.add_argument(
@@ -134,11 +134,11 @@ def resolve_subjects(config, split: str | None, subject: str | None) -> list[str
 
 def load_model(config, checkpoint_path: Path, device: torch.device) -> VoxWhisper:
     model = VoxWhisper.from_config(config).to(device)
-    model.print_summary(config)
     try:
+        ckpt = torch.load(checkpoint_path, map_location=device, weights_only=True)
+    except Exception:
+        # Fallback for older checkpoints that contain non-tensor objects (e.g. config dict).
         ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
-    except TypeError:
-        ckpt = torch.load(checkpoint_path, map_location=device)
     state = ckpt["model_state_dict"] if isinstance(ckpt, dict) and "model_state_dict" in ckpt else ckpt
     load_model_state(model, state)
     model.eval()

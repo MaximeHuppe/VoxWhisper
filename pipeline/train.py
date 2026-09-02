@@ -1,15 +1,16 @@
-# train.py — config-driven VoxWhisper training
+# pipeline/train.py — config-driven VoxWhisper training
 from __future__ import annotations
+
+import argparse
 import logging
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
 )
+
 import torch
 from torch.utils.data import DataLoader
-
-from tqdm import tqdm
 
 from src.dataset import VoxWhisperDataset
 from src.models.vox_whisper import VoxWhisper
@@ -17,6 +18,7 @@ from src.utils.checkpoint import (
     TopKCheckpoints,
     checkpoint_config,
     describe_monitor,
+    load_model_state,
     monitor_score,
     save_checkpoint,
     should_eval_volume,
@@ -25,17 +27,26 @@ from src.utils.checkpoint import (
 from src.utils.config import (
     ensure_dir,
     load_config,
-    parse_config_args,
     resolve_path,
 )
+from src.utils.logger import TrainingLogger
 from src.utils.metrics import DiceBCELoss, deep_supervision_loss
 from src.utils.seed import get_training_seed, set_global_seed, worker_init_fn
 from src.utils.splits import create_or_load_splits
 from src.utils.validate import evaluate_patches, evaluate_volume_dice
 
+# Maximum gradient norm for clipping.  MHA-heavy architectures can produce
+# large gradient spikes early in training; clipping improves stability without
+# significantly slowing convergence.
+_GRAD_CLIP_NORM = 1.0
 
-def build_loaders(config, seed: int):
-    """Create train (and optional val) DataLoaders from config."""
+
+def build_loaders(config: dict, seed: int):
+    """Create train (and optional val) DataLoaders from config.
+
+    Returns ``(train_loader, val_loader)`` where ``val_loader`` is ``None``
+    when no split is configured.
+    """
     train_cfg = config["training"]
     dl_cfg = train_cfg["dataloader"]
     splits_cfg = config["splits"]
@@ -48,9 +59,7 @@ def build_loaders(config, seed: int):
     )
     if num_workers > 0:
         common_kwargs["persistent_workers"] = True
-        common_kwargs["worker_init_fn"] = lambda worker_id: worker_init_fn(
-            worker_id, seed
-        )
+        common_kwargs["worker_init_fn"] = lambda worker_id: worker_init_fn(worker_id, seed)
 
     shuffle = dl_cfg.get("shuffle", True)
     train_generator = torch.Generator()
@@ -58,12 +67,8 @@ def build_loaders(config, seed: int):
 
     if splits_cfg.get("enabled", False):
         splits = create_or_load_splits(config)
-        train_dataset = VoxWhisperDataset(
-            config, subject_ids=splits["train"], training=True
-        )
-        val_dataset = VoxWhisperDataset(
-            config, subject_ids=splits["val"], training=False
-        )
+        train_dataset = VoxWhisperDataset(config, subject_ids=splits["train"], training=True)
+        val_dataset = VoxWhisperDataset(config, subject_ids=splits["val"], training=False)
         train_loader = DataLoader(
             train_dataset,
             shuffle=shuffle,
@@ -90,7 +95,33 @@ def build_loaders(config, seed: int):
     return train_loader, None
 
 
-def train_model(config):
+def _load_resume_state(cache_dir, model, optimizer, scheduler):
+    """Load the latest checkpoint and fast-forward the scheduler.
+
+    Returns the epoch to resume from (1-based, i.e. training continues at
+    epoch ``start_epoch + 1``).  Returns 0 when no checkpoint is found.
+    """
+    latest = cache_dir / "vox_whisper_latest.pt"
+    if not latest.exists():
+        print("Warning: --resume requested but no checkpoint found — starting fresh")
+        return 0
+
+    ckpt = torch.load(latest, map_location="cpu", weights_only=False)
+    load_model_state(model, ckpt["model_state_dict"])
+    optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+
+    start_epoch = int(ckpt.get("epoch", 0))
+
+    # Advance the scheduler to match the saved state.  CosineAnnealingLR is
+    # stateless apart from ``last_epoch``, so replaying ``step()`` is correct.
+    for _ in range(start_epoch):
+        scheduler.step()
+
+    print(f"Resumed from epoch {start_epoch}: {latest}")
+    return start_epoch
+
+
+def train_model(config: dict, resume: bool = False) -> None:
     train_cfg = config["training"]
     seed = get_training_seed(config)
     set_global_seed(seed)
@@ -98,10 +129,8 @@ def train_model(config):
     inf_threshold = float(config.get("inference", {}).get("threshold", 0.5))
 
     device = torch.device(
-        "cuda"
-        if torch.cuda.is_available()
-        else "mps"
-        if torch.backends.mps.is_available()
+        "cuda" if torch.cuda.is_available()
+        else "mps" if torch.backends.mps.is_available()
         else "cpu"
     )
 
@@ -114,13 +143,12 @@ def train_model(config):
 
     print(f"Training seed: {seed}")
     print(f"Checkpoint monitor: {describe_monitor(ckpt_cfg)}")
+    print(f"Device: {device}")
     print("Initializing dataset and dataloader...")
     train_loader, val_loader = build_loaders(config, seed)
 
     if val_loader is None:
-        print(
-            "Warning: no val split; metric-based best checkpoint will be skipped"
-        )
+        print("Warning: no val split — metric-based best checkpoint will be skipped")
 
     model = VoxWhisper.from_config(config).to(device)
     n_decoder_stages = len(model.decoder.up_blocks)
@@ -130,125 +158,123 @@ def train_model(config):
             f"but the decoder has {n_decoder_stages} stages"
         )
     model.print_summary(config)
-    criterion = DiceBCELoss()
+
+    n_prompts = len(config["data"]["prompts"])
+    class_names = config["data"].get("structure_names") or config["data"]["prompts"]
+    criterion = DiceBCELoss.from_config(config, n_prompts)
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
-
     topk = TopKCheckpoints(k=ckpt_cfg["keep"], cache_dir=cache_dir)
 
-    print(f"Starting training on device: {device}...")
-    for epoch in tqdm(range(epochs), desc="Training"):
-        model.train()
-        epoch_loss = 0.0
+    start_epoch = 0
+    if resume:
+        start_epoch = _load_resume_state(cache_dir, model, optimizer, scheduler)
+        restored = topk.restore_from_manifest()
+        if restored:
+            print(f"Restored {restored} top-k checkpoint entries from manifest")
 
-        for primary_vol, secondary_vol, text_emb, gt_mask in train_loader:
-            primary_vol = primary_vol.to(device)
-            secondary_vol = secondary_vol.to(device)
-            text_emb = text_emb.to(device)
-            gt_mask = gt_mask.to(device)
+    with TrainingLogger(cache_dir, total_epochs=epochs, resume=resume) as logger:
+        for epoch in range(start_epoch, epochs):
+            model.train()
+            epoch_loss = 0.0
 
-            optimizer.zero_grad()
-            predictions = model(primary_vol, secondary_vol, text_emb)
-            batch_loss = deep_supervision_loss(
-                predictions, gt_mask, criterion, deep_sup_weights
-            )
-            batch_loss.backward()
-            optimizer.step()
-            epoch_loss += batch_loss.item()
+            for primary_vol, secondary_vol, text_emb, gt_mask in train_loader:
+                primary_vol = primary_vol.to(device)
+                secondary_vol = secondary_vol.to(device)
+                text_emb = text_emb.to(device)
+                gt_mask = gt_mask.to(device)
 
-        scheduler.step()
-        avg_loss = epoch_loss / len(train_loader) if len(train_loader) > 0 else epoch_loss
-        metrics = {"train_loss": avg_loss}
+                optimizer.zero_grad()
+                predictions = model(primary_vol, secondary_vol, text_emb)
+                batch_loss = deep_supervision_loss(predictions, gt_mask, criterion, deep_sup_weights)
+                batch_loss.backward()
 
-        log_msg = (
-            f"Epoch [{epoch + 1}/{epochs}] - "
-            f"Train Loss: {avg_loss:.4f} - "
-            f"LR: {scheduler.get_last_lr()[0]:.6f}"
-        )
+                torch.nn.utils.clip_grad_norm_(model.parameters(), _GRAD_CLIP_NORM)
 
-        if val_loader is not None:
-            val_metrics = evaluate_patches(
-                model,
-                val_loader,
-                criterion,
-                deep_sup_weights,
-                device,
-                threshold=inf_threshold,
-            )
-            metrics.update(val_metrics)
-            log_msg += (
-                f" - Val Loss: {val_metrics['val_loss']:.4f}"
-                f" - Val Dice (patch): {val_metrics['dice_patch']:.4f}"
-            )
+                optimizer.step()
+                epoch_loss += batch_loss.item()
 
-            want_volume = (
-                ckpt_cfg["monitor"] == "dice"
-                and ckpt_cfg["dice_scope"] == "volume"
-                and should_eval_volume(epoch, ckpt_cfg["volume_every"])
-            )
-            if want_volume:
-                volume_dice = evaluate_volume_dice(
-                    model, config, val_loader.dataset.subject_ids, device
+            scheduler.step()
+            avg_loss = epoch_loss / len(train_loader) if len(train_loader) > 0 else epoch_loss
+            metrics = {"train_loss": avg_loss}
+
+            if val_loader is not None:
+                val_metrics = evaluate_patches(
+                    model, val_loader, criterion, deep_sup_weights, device,
+                    threshold=inf_threshold,
+                    class_names=class_names,
                 )
-                if volume_dice is None:
-                    print("Warning: volume Dice skipped (no val subjects with GT)")
-                else:
-                    metrics["dice_volume"] = volume_dice
-                    log_msg += f" - Val Dice (volume): {volume_dice:.4f}"
+                metrics.update(val_metrics)
 
-        print(log_msg)
+                want_volume = (
+                    ckpt_cfg["monitor"] == "dice"
+                    and ckpt_cfg["dice_scope"] == "volume"
+                    and should_eval_volume(epoch, ckpt_cfg["volume_every"])
+                )
+                if want_volume:
+                    volume_metrics = evaluate_volume_dice(
+                        model, config, val_loader.dataset.subject_ids, device
+                    )
+                    if volume_metrics is None:
+                        print("Warning: volume Dice skipped (no val subjects with GT)")
+                    else:
+                        metrics.update(volume_metrics)
 
-        score, higher_is_better, score_name = monitor_score(metrics, ckpt_cfg)
-        if score is not None:
-            rank = topk.update(
-                score,
-                higher_is_better,
-                score_name,
-                epoch + 1,
-                lambda path: save_checkpoint(
-                    path,
+            current_lr = scheduler.get_last_lr()[0]
+            score, higher_is_better, score_name = monitor_score(metrics, ckpt_cfg)
+
+            rank = None
+            if score is not None:
+                rank = topk.update(
+                    score,
+                    higher_is_better,
+                    score_name,
                     epoch + 1,
-                    model,
-                    optimizer,
-                    metrics,
-                    config,
-                    extra={
-                        "monitor_score": score,
-                        "monitor_metric": score_name,
-                    },
-                ),
-            )
-            if rank is not None:
-                print(
-                    f"Saved top-{rank}/{ckpt_cfg['keep']} checkpoint "
-                    f"({score_name}={score:.4f})"
+                    lambda path: save_checkpoint(
+                        path, epoch + 1, model, optimizer, metrics, config,
+                        extra={"monitor_score": score, "monitor_metric": score_name},
+                    ),
                 )
 
-        latest_extra = {}
-        if score is not None:
-            latest_extra = {
-                "monitor_score": score,
-                "monitor_metric": score_name,
-            }
-        save_checkpoint(
-            cache_dir / "vox_whisper_latest.pt",
-            epoch + 1,
-            model,
-            optimizer,
-            metrics,
-            config,
-            extra=latest_extra or None,
-        )
+            logger.log_epoch(epoch + 1, metrics, current_lr, rank)
 
-        if should_save_periodic(epoch, ckpt_cfg):
-            checkpoint_path = cache_dir / f"vox_whisper_epoch_{epoch + 1}.pt"
-            save_checkpoint(
-                checkpoint_path, epoch + 1, model, optimizer, metrics, config
+            latest_extra = (
+                {"monitor_score": score, "monitor_metric": score_name}
+                if score is not None else None
             )
-            print(f"Saved checkpoint to: {checkpoint_path}")
+            save_checkpoint(
+                cache_dir / "vox_whisper_latest.pt",
+                epoch + 1,
+                model,
+                optimizer,
+                metrics,
+                config,
+                extra=latest_extra,
+            )
+
+            if should_save_periodic(epoch, ckpt_cfg):
+                checkpoint_path = cache_dir / f"vox_whisper_epoch_{epoch + 1}.pt"
+                save_checkpoint(checkpoint_path, epoch + 1, model, optimizer, metrics, config)
+                print(f"Saved periodic checkpoint: {checkpoint_path.name}")
+
+        logger.print_summary()
 
 
 if __name__ == "__main__":
-    args = parse_config_args(description="Train VoxWhisper")
+    parser = argparse.ArgumentParser(description="Train VoxWhisper")
+    parser.add_argument(
+        "--config",
+        default="config/tracts.yaml",
+        help="Path to YAML config (relative to project root or absolute)",
+    )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help=(
+            "Resume from vox_whisper_latest.pt in the checkpoint directory. "
+            "If no checkpoint exists, training starts from scratch with a warning."
+        ),
+    )
+    args = parser.parse_args()
     cfg = load_config(args.config)
-    train_model(cfg)
+    train_model(cfg, resume=args.resume)
