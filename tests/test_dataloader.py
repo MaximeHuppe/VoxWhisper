@@ -27,6 +27,7 @@ def _make_test_config(tmp_path: Path) -> dict:
     cfg["data"]["paths"]["cache"] = str(tmp_path / "cache")
     cfg["data"]["mock_volume_shape"] = [64, 64, 64]
     cfg["data"]["patch"]["size"] = [32, 32, 32]
+    cfg["data"]["patch"]["train_patches_per_subject"] = 1
     cfg["splits"]["enabled"] = False
     cfg["training"]["batch_size"] = 2
     cfg["training"]["dataloader"]["num_workers"] = 0
@@ -198,9 +199,10 @@ def test_validation_uses_frozen_patches_per_subject():
         other = VoxWhisperDataset(cfg, training=False)
         torch.testing.assert_close(dataset[0][0], other[0][0])
 
-        nerve_channel = int(cfg["data"]["patch"]["positive_labels"][0])
+        # First frozen val crop is the foreground centroid — some tract channel
+        # must be present, not necessarily the first positive label.
         _, _, _, gt_mask = dataset[0]
-        assert gt_mask[nerve_channel].sum() > 0
+        assert gt_mask[1:].sum() > 0
 
 
 def test_training_uses_adaptive_patch_sampling():
@@ -210,6 +212,13 @@ def test_training_uses_adaptive_patch_sampling():
         patches = [dataset[0][0] for _ in range(24)]
         differs = any(not torch.equal(patches[0], p) for p in patches[1:])
         assert differs, "expected adaptive train sampling to produce more than one crop"
+
+
+def test_training_length_is_patches_per_subject():
+    with temp_test_config() as cfg:
+        cfg["data"]["patch"]["train_patches_per_subject"] = 4
+        dataset = VoxWhisperDataset(cfg, training=True)
+        assert len(dataset) == len(dataset.subject_ids) * 4
 
 
 def test_gt_mask_channels_are_binary():
@@ -231,6 +240,7 @@ def _run_all():
         test_training_step_with_dataloader_batch,
         test_validation_uses_frozen_patches_per_subject,
         test_training_uses_adaptive_patch_sampling,
+        test_training_length_is_patches_per_subject,
         test_gt_mask_channels_are_binary,
     ]
     for test_fn in tests:
