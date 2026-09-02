@@ -11,7 +11,7 @@ import torch
 from torch.utils.data import Dataset
 
 from src.utils.config import active_modality_keys, resolve_path
-from src.utils.nifti_io import (
+from src.data.nifti_io import (
     extract_patch_3d,
     label_to_multichannel,
     list_subject_ids,

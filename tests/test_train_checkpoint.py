@@ -9,7 +9,7 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from src.utils.checkpoint import (
+from src.training.checkpoint import (
     TopKCheckpoints,
     checkpoint_config,
     is_better,
@@ -18,7 +18,7 @@ from src.utils.checkpoint import (
     should_eval_volume,
     should_save_periodic,
 )
-from src.utils.metrics import foreground_channel_dice
+from src.training.metrics import foreground_channel_dice
 
 
 def test_checkpoint_config_defaults():

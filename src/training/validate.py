@@ -12,12 +12,12 @@ from src.infer import (
     predict_full_volume,
     volumes_to_tensors,
 )
-from src.utils.metrics import (
+from src.training.metrics import (
     channel_dice_from_logits,
     deep_supervision_loss,
     named_foreground_dice,
 )
-from src.utils.nifti_io import label_to_multichannel
+from src.data.nifti_io import label_to_multichannel
 
 
 def _mean_channel_scores(score_lists: Sequence[Sequence[float]]) -> list[float]:

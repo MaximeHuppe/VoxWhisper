@@ -9,7 +9,7 @@ import torch.nn as nn
 from monai.inferers import sliding_window_inference
 
 from src.utils.config import resolve_path
-from src.utils.nifti_io import load_nifti, mask_path, volume_path
+from src.data.nifti_io import load_nifti, mask_path, volume_path
 
 RoiSize = Union[Sequence[int], int]
 

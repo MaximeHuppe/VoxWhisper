@@ -19,7 +19,7 @@ from src.utils.config import (  # noqa: E402
     resolve_path,
     active_modality_keys,
 )
-from src.utils.nifti_io import (  # noqa: E402
+from src.data.nifti_io import (  # noqa: E402
     mask_path,
     resolve_raw_volume_path,
     save_nifti,

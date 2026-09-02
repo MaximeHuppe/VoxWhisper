@@ -13,6 +13,7 @@ trained_models/
 cache/*/*.pt
 cache/*.npy
 cache/*.npz
+runs/
 
 # ==========================================
 # Python Environment & Caches

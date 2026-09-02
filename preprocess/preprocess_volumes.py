@@ -17,7 +17,7 @@ from src.utils.config import (  # noqa: E402
     parse_config_args,
     resolve_path,
 )
-from src.utils.nifti_io import (  # noqa: E402
+from src.data.nifti_io import (  # noqa: E402
     load_nifti,
     normalize_intensity,
     resolve_raw_volume_path,

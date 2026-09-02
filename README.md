@@ -23,9 +23,12 @@ python pipeline/run_preprocess.py --config config/tracts.yaml
 python pipeline/train.py --config config/tracts.yaml
 
 # 3. Full-volume sliding-window evaluation
-python pipeline/evaluate.py --config config/tracts.yaml \
-  --checkpoint cache/vox_whisper_best.pt --split test
+python pipeline/evaluate.py --config config/tracts.yaml --split test
+# or: --run-dir runs/processed_T1_FA/baseline/<timestamp>
+# or: --checkpoint runs/.../vox_whisper_best.pt
 ```
+
+Training writes to `runs/{processed_leaf}/{run_name}/{timestamp}/` (see [`pipeline/README.md`](pipeline/README.md)). Shared prompt embeddings stay under `cache/`.
 
 Optional AWS download of HCP structurals is documented under [`preprocess/`](preprocess/README.md) (`extract_hcp.py`); it needs extra config keys not present in `tracts.yaml` by default.
 

@@ -83,6 +83,8 @@ Subject lists come from a split manifest (`data/splits.json`) when `splits.enabl
 | Module | Role |
 |--------|------|
 | `config.py` | Load YAML, resolve paths, inject prompts from `structures.json` |
+| `run.py` | Timestamped run dirs under `runs/{dataset}/{run_name}/`; config + meta snapshots |
+| `logger.py` | Per-epoch `metrics.jsonl` + stdout table |
 | `nifti_io.py` | Load/save NIfTI, patch extract, path helpers |
 | `metrics.py` | `DiceBCELoss`, deep-supervision helper, Dice scores |
 | `checkpoint.py` | Top-k / periodic / latest saves; legacy state-dict remap |

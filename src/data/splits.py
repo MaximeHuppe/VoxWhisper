@@ -12,7 +12,7 @@ from src.utils.config import get_project_root, resolve_path
 
 def list_processed_subjects(config: Mapping) -> list[str]:
     """Return sorted subject IDs with processed NIfTI (or legacy NPZ) data."""
-    from src.utils.nifti_io import list_subject_ids
+    from src.data.nifti_io import list_subject_ids
 
     processed_dir = resolve_path(config, "data.paths.processed")
     return list_subject_ids(processed_dir)

@@ -1,10 +1,10 @@
 """Structured per-epoch training logger for VoxWhisper.
 
-Each training run writes one JSONL file to the checkpoint directory:
+Each training run writes one JSONL file inside the run directory::
 
-    cache/baseline_T1_B0/run_20260902_114200.jsonl
+    runs/processed_T1_FA/baseline/20260902_114200/metrics.jsonl
 
-One JSON object per line, one line per epoch:
+One JSON object per line, one line per epoch::
 
     {"epoch": 1, "elapsed_s": 94.2, "lr": 5e-05,
      "train_loss": 1.042, "val_loss": 0.891, "dice_patch": 0.183,
@@ -14,22 +14,22 @@ One JSON object per line, one line per epoch:
 Rationale
 ---------
 stdout output is transient — lost when a terminal closes or a job scheduler
-captures only part of stderr.  A JSONL file is trivially readable with:
+captures only part of stderr.  A JSONL file is trivially readable with::
 
     import pandas as pd
-    df = pd.read_json("run_....jsonl", lines=True)
+    df = pd.read_json("metrics.jsonl", lines=True)
     df.plot(x="epoch", y=["train_loss", "val_loss"])
 
 Resume behaviour
 ----------------
-When ``--resume`` is used, ``TrainingLogger.open()`` detects the *newest*
-existing ``.jsonl`` in the cache directory and appends to it, so a resumed
-run shares one continuous log with its predecessor.
+When ``--resume`` is used, ``TrainingLogger`` appends to the existing
+``metrics.jsonl`` in the run directory (or falls back to the newest
+legacy ``run_*.jsonl`` if present).
 
 Stdout format
 -------------
 A fixed-width table row is printed per epoch so progress is easy to read
-while training:
+while training::
 
     Ep   1/150  loss 1.0421  val_loss 0.8910  dice_patch 0.1832  lr 5.00e-05
     Ep   5/150  loss 0.9102  val_loss 0.8121  dice_patch 0.2210  dice_vol 0.198  lr 4.98e-05  [top-2]
@@ -38,9 +38,10 @@ from __future__ import annotations
 
 import json
 import time
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
+
+METRICS_FILENAME = "metrics.jsonl"
 
 
 def _jsonify_metric(value: Any) -> Any:
@@ -63,19 +64,18 @@ class TrainingLogger:
 
     Parameters
     ----------
-    cache_dir : directory where the ``.jsonl`` file is written.
+    run_dir : directory where ``metrics.jsonl`` is written.
     total_epochs : total number of training epochs (used for the epoch column width).
-    resume : if ``True``, append to the most recent existing ``.jsonl`` in
-             ``cache_dir`` rather than creating a new file.
+    resume : if ``True``, append to an existing metrics file rather than truncating.
     """
 
     def __init__(
         self,
-        cache_dir: Path,
+        run_dir: Path,
         total_epochs: int,
         resume: bool = False,
     ) -> None:
-        self.cache_dir = Path(cache_dir)
+        self.run_dir = Path(run_dir)
         self.total_epochs = total_epochs
         self._start_time = time.monotonic()
         self._file = self._open(resume)
@@ -85,17 +85,20 @@ class TrainingLogger:
     # ------------------------------------------------------------------
 
     def _open(self, resume: bool):
-        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        self.run_dir.mkdir(parents=True, exist_ok=True)
+        path = self.run_dir / METRICS_FILENAME
 
         if resume:
-            existing = sorted(self.cache_dir.glob("run_*.jsonl"))
-            if existing:
-                path = existing[-1]
+            if path.exists():
                 print(f"[Logger] Appending to existing run log: {path.name}")
                 return open(path, "a", encoding="utf-8")  # noqa: SIM115
+            # Legacy flat layout: run_YYYYMMDD_HHMMSS.jsonl
+            legacy = sorted(self.run_dir.glob("run_*.jsonl"))
+            if legacy:
+                path = legacy[-1]
+                print(f"[Logger] Appending to legacy run log: {path.name}")
+                return open(path, "a", encoding="utf-8")  # noqa: SIM115
 
-        timestamp = datetime.now(tz=timezone.utc).strftime("%Y%m%d_%H%M%S")
-        path = self.cache_dir / f"run_{timestamp}.jsonl"
         print(f"[Logger] Writing run log to: {path.name}")
         return open(path, "w", encoding="utf-8")  # noqa: SIM115
 

@@ -11,7 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from src.models.attention import PositionalEncoding3D, bottleneck_spatial_size
 from src.models.encoder import Encoder
 from src.models.vox_whisper import VoxWhisper
-from src.utils.checkpoint import remap_legacy_state_dict
+from src.training.checkpoint import remap_legacy_state_dict
 from src.utils.config import load_config
 
 

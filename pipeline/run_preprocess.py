@@ -51,7 +51,7 @@ from src.utils.config import (
     parse_config_args,
     resolve_path,
 )
-from src.utils.nifti_io import required_processed_paths, subject_is_complete
+from src.data.nifti_io import required_processed_paths, subject_is_complete
 
 
 def drop_incomplete_processed(config) -> list[str]:

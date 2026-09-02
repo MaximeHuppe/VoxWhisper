@@ -14,10 +14,10 @@ from torch.utils.data import DataLoader
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from preprocess.generate_mock_dataset import make_mock_cohort
-from src.dataset import VoxWhisperDataset
+from src.data.dataset import VoxWhisperDataset
 from src.models.vox_whisper import VoxWhisper
 from src.utils.config import load_config, resolve_path
-from src.utils.metrics import DiceBCELoss
+from src.training.metrics import DiceBCELoss
 
 
 def _make_test_config(tmp_path: Path) -> dict:
