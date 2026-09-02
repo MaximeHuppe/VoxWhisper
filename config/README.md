@@ -64,6 +64,19 @@ These keys must match entries under `data.volumes` and become filenames `{key}.n
 | `val_patches_per_subject` | Frozen crops per subject in val/test |
 | `positive_labels` | Injected from structures (do not edit by hand if using `structures.json`) |
 
+### `data.augmentation`
+
+Train-only patch transforms applied in `VoxWhisperDataset` after crop. Spatial ops stay coupled across primary / secondary / mask; intensity ops are per-modality. Flips on `lr_axis` remap `*_left` ↔ `*_right` labels from `structures.json`.
+
+| Key | Meaning |
+|-----|---------|
+| `enabled` | Master switch (default off if section omitted) |
+| `lr_axis` | Axis treated as left–right in `(D, H, W)` patches (`2` = W/x); `null` skips remapping |
+| `flip.axes` / `flip.p` | Axes eligible for flip; independent probability per axis |
+| `rotate.*` | Small 3D rotations (`max_angle_deg`, `p`); nearest-neighbor on labels |
+| `scale.*` | Isotropic zoom then center crop/pad (`range`, `p`) |
+| `intensity.*` | Noise / gamma / contrast on image patches only |
+
 ### `data.mock_volume_shape`
 
 Legacy leftover from a removed mock generator. Unused by the current train/preprocess path.

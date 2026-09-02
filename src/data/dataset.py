@@ -11,6 +11,7 @@ import torch
 from torch.utils.data import Dataset
 
 from src.utils.config import active_modality_keys, resolve_path
+from src.data.augment import PatchAugmentor
 from src.data.nifti_io import (
     extract_patch_3d,
     label_to_multichannel,
@@ -78,6 +79,7 @@ class VoxWhisperDataset(Dataset):
             raise ValueError("data.patch.train_patches_per_subject must be >= 1")
         self._train_seed = get_training_seed(config) if training else None
         self._rng: Optional[np.random.Generator] = None
+        self.augmentor = PatchAugmentor.from_config(config) if training else PatchAugmentor(enabled=False)
 
         cache_dir = resolve_path(config, "data.paths.cache")
         cache_file = cache_dir / config["text_encoder"]["cache_file"]
@@ -326,6 +328,11 @@ class VoxWhisperDataset(Dataset):
         primary_patch = extract_patch_3d(primary_full, center, self.patch_size)
         secondary_patch = extract_patch_3d(secondary_full, center, self.patch_size)
         label_patch = extract_patch_3d(labels_full, center, self.patch_size)
+
+        if self.training and self.augmentor.enabled:
+            primary_patch, secondary_patch, label_patch = self.augmentor(
+                primary_patch, secondary_patch, label_patch, self._get_rng()
+            )
 
         gt_mask = label_to_multichannel(label_patch, self.n_prompts)
 

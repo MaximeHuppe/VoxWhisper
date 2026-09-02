@@ -36,6 +36,21 @@ data:
     train_patches_per_subject: 4
     val_patches_per_subject: 4
 
+  # Train-only. Spatial ops are coupled across primary/secondary/mask.
+  # Flips on lr_axis remap *_left ↔ *_right labels from structures.json.
+  # Train-only.  Only the LR flip is anatomically valid in RAS space:
+  # the brain is not symmetric along A-P or S-I, so flipping those axes
+  # creates impossible tract configurations.
+  # rotate_p is 0 by default; enable and validate on a pilot run first.
+  augmentation:
+    enabled: true
+    lr_axis: 2          # W — the R axis in HCP ACPC volumes (W=R, H=A, D=S)
+    flip_p: 0.5
+    rotate_p: 0.0       # set > 0 to enable; uses a single affine_transform pass
+    max_angle_deg: 10.0
+    noise_p: 0.5
+    noise_std: 0.05     # fraction of each patch's own std
+
   mock_volume_shape: [192, 192, 192]
 
 preprocessing:
