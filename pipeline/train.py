@@ -227,8 +227,23 @@ def train_model(
     n_prompts = len(config["data"]["prompts"])
     class_names = config["data"].get("structure_names") or config["data"]["prompts"]
     criterion = DiceBCELoss.from_config(config, n_prompts)
+    warmup_epochs = train_cfg.get("warmup_epochs", 0)
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
+    if warmup_epochs > 0:
+        scheduler = torch.optim.lr_scheduler.SequentialLR(
+            optimizer,
+            schedulers=[
+                torch.optim.lr_scheduler.LinearLR(
+                    optimizer, start_factor=1e-3, end_factor=1.0, total_iters=warmup_epochs
+                ),
+                torch.optim.lr_scheduler.CosineAnnealingLR(
+                    optimizer, T_max=epochs - warmup_epochs
+                ),
+            ],
+            milestones=[warmup_epochs],
+        )
+    else:
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
     topk = TopKCheckpoints(k=ckpt_cfg["keep"], cache_dir=run_path)
 
     start_epoch = 0

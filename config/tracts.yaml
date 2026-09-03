@@ -67,11 +67,12 @@ training:
   batch_size: 2
   epochs: 150
   learning_rate: 0.00005
+  warmup_epochs: 10             # linear LR warmup; 0 = disabled
   bce_pos_weight: 20         # foreground BCE weight; background stays 1
   deep_supervision_weights: [0.1, 0.3, 0.6]
   checkpoint:
     monitor: dice          # loss | dice
-    dice_scope: volume      # patch | volume (only if monitor=dice)
+    dice_scope: patch      # patch | volume (only if monitor=dice)
     keep: 3                # top-k by monitor (highest dice / lowest loss)
     every: 10              # write vox_whisper_epoch_N.pt every N epochs
     volume_every: 5       # full-volume Dice every N epochs (dice_scope=volume)
