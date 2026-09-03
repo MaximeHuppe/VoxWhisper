@@ -224,6 +224,32 @@ class VoxWhisper(nn.Module):
             pe_size=pe_size,
         )
 
+    def param_counts(self) -> dict[str, int]:
+        """Return parameter counts for the full model and top-level blocks."""
+        total, _, _, _ = _numel_stats(self)
+        counts = {"total": total}
+        for name, child in self.named_children():
+            n, _, _, _ = _numel_stats(child)
+            counts[name] = n
+        return counts
+
+    def print_param_counts(self) -> None:
+        """Print a compact parameter breakdown (total + top-level blocks)."""
+        counts = self.param_counts()
+        total = counts["total"]
+        print(f"  Params     total={_fmt_count(total)}")
+        for name, child in self.named_children():
+            n = counts[name]
+            share = (100.0 * n / total) if total else 0.0
+            short = {
+                "primary_encoder": "primary_encoder",
+                "secondary_encoder": "secondary_encoder",
+                "cross_volume_attention": "attention",
+                "prompt_decoder": "prompt_decoder",
+                "decoder": "decoder",
+            }.get(name, name)
+            print(f"             {short:<22} {_fmt_count(n):>12}  ({share:5.1f}%)")
+
     def print_summary(self, config=None, *, max_depth=4):
         """Print parameter counts, memory size, and a per-module breakdown."""
         total, trainable, n_buffers, nbytes = _numel_stats(self)

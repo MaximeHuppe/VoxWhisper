@@ -46,6 +46,7 @@ def _print_run_header(
     ckpt_cfg: dict,
     train_loader,
     val_loader,
+    model=None,
 ) -> None:
     """Print a compact one-time summary at training start."""
     train_cfg = config["training"]
@@ -74,11 +75,13 @@ def _print_run_header(
     print(f"  VoxWhisper  ·  {run_name}  ·  {dataset}")
     print(sep)
     print(f"  Run        {run_path}")
-    print(f"  Device     {device:<20}  Seed     {seed}")
+    print(f"  Device     {str(device):<20}  Seed     {seed}")
     print(f"  Epochs     {train_cfg['epochs']:<8}  LR  {train_cfg['learning_rate']:.2e}"
           f"    Batch  {train_cfg['batch_size']}")
     print(f"  Monitor    {describe_monitor(ckpt_cfg)}")
     print(f"  Structures {n_structs}  [{struct_preview}]")
+    if model is not None:
+        model.print_param_counts()
     print(sep)
     print(f"  Modalities primary={modalities.get('primary','?')}  "
           f"secondary={modalities.get('secondary','?')}")
@@ -190,6 +193,7 @@ def train_model(
     )
 
     epochs = train_cfg["epochs"]
+    learning_rate = train_cfg["learning_rate"]
     deep_sup_weights = train_cfg["deep_supervision_weights"]
 
     run_path = create_or_resume_run(
@@ -216,7 +220,9 @@ def train_model(
     if verbose:
         model.print_summary(config)
 
-    _print_run_header(config, run_path, device, seed, ckpt_cfg, train_loader, val_loader)
+    _print_run_header(
+        config, run_path, device, seed, ckpt_cfg, train_loader, val_loader, model=model
+    )
 
     n_prompts = len(config["data"]["prompts"])
     class_names = config["data"].get("structure_names") or config["data"]["prompts"]
