@@ -8,6 +8,7 @@ data/processed_*/
 data/predictions/
 output/
 trained_models/
+wandb/
 
 # Exclude pre-computed text embeddings and trained model checkpoints
 cache/*/*.pt
@@ -45,8 +46,10 @@ MANIFEST
 venv/
 .venv/
 env/
+.env
 ENV/
 ImperialEnv/
+.cursor/
 
 # Jupyter Notebooks
 .ipynb_checkpoints

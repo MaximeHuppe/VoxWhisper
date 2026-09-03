@@ -102,7 +102,7 @@ logging:
     log_dir: null
   wandb:
     project: voxwhisper
-    entity: null       # W&B username or team; null uses your default
+    entity: imag2
     tags: []
 
 inference:

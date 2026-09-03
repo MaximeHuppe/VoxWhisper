@@ -1,0 +1,176 @@
+# =============================================================================
+# baseline.yaml — Chain Step 0 anchor config
+#
+# This file is the single source of truth for the initial baseline experiment.
+# Every hyperparameter is set explicitly; parameters that are "not used" in
+# this config are set to 0 (or their equivalent disabled value) so there are
+# no hidden defaults.
+#
+# Role in the experiment pipeline
+# --------------------------------
+# prepared_runs.py loads this file as its base config, then applies the
+# cumulative overrides defined in CHAIN_* / ABL_* dicts on top of it.
+# Only the keys that differ from the baseline need to appear in each run dict.
+#
+# Baseline recipe summary
+# -----------------------
+#   Architecture : Normal — encoder [16, 32, 64, 128]  embed_dim 128
+#   Learning rate: 5e-5  (no warmup)
+#   Loss         : BCE pos_weight 20  |  Dice weight 1.0  |  BCE weight 1.0
+#   Batch        : 2 physical  /  2 effective  (no gradient accumulation)
+#   Patches      : 4 per subject (train)  /  4 per subject (val)
+#   Patch size   : 128³
+#   Modalities   : T1 (primary) + FA (secondary)
+#   Normalisation: z-score
+#
+# Results: Val Patch Dice 0.5386 / Test Mean Dice (Ch) 0.5545
+# =============================================================================
+
+# ── Data ─────────────────────────────────────────────────────────────────────
+
+data:
+  paths:
+    raw:       data/raw
+    processed: data/processed_T1_FA    # leaf name used to organise run dirs
+    cache:     cache                   # shared artifacts (e.g. prompt embeddings)
+    runs:      runs                    # output root: runs/{processed_leaf}/{run_name}/{timestamp}/
+
+  modalities:
+    primary:   t1
+    secondary: fa                      # options: fa | t2 | b0
+
+  volumes:
+    t1:
+      filename: T1w_acpc_dc_restore_1.25.nii.gz
+    t2:
+      filename: T2w_acpc_dc_restore.nii.gz
+    b0:
+      filename: average_b0.nii.gz
+    fa:
+      filename: dti_FA.nii.gz
+
+  masks:
+    source:     tract_masks_1.25       # sub-folder inside each subject dir
+    structures: config/structures.json
+
+  download:
+    modalities:    ["diffusion"]       # which HCP modality packages to fetch
+    bucket:        hcp-openaccess
+    dataset_prefix: HCP_1200
+
+  patch:
+    size:                    [128, 128, 128]   # voxels  (D × H × W)
+    positive_ratio:          0.5               # fraction of crops centred on foreground
+    train_patches_per_subject: 2               # crops sampled per subject per epoch
+    val_patches_per_subject:   4               # kept constant across all experiments
+
+  mock_volume_shape: [192, 192, 192]           # used only for unit tests / dry runs
+
+# ── Pre-processing ────────────────────────────────────────────────────────────
+
+preprocessing:
+  normalization:       zscore    # options: zscore | minmax
+  zscore_nonzero_only: true      # compute mean/std from brain-masked voxels only
+
+# ── Text encoder (frozen) ─────────────────────────────────────────────────────
+
+text_encoder:
+  model_name: microsoft/BiomedNLP-PubMedBERT-base-uncased-abstract-fulltext
+  cache_file: prompts_tracts.pt  # pre-computed prompt embeddings (shared)
+
+# ── Model architecture ────────────────────────────────────────────────────────
+
+model:
+  input_channels: 1              # primary (T1) encoder channels
+  secondary_encoder:
+    input_channels: 1            # secondary (FA/T2/B0) encoder channels
+
+  text_dim:   768                # PubMedBERT hidden size (do not change)
+  embed_dim:  128                # bottleneck dim; must equal encoder.channels[-1]
+  num_heads:  4                  # attention heads in CrossVolumeAttention + PromptDecoder
+
+  encoder:
+    channels:      [16, 32, 64, 128]   # "Normal" size  (LARGE: [32, 64, 128, 256])
+    strides:       [2, 2, 2]
+    kernel_sizes:  [3, 3, 3]
+    paddings:      [1, 1, 1]
+    num_resblocks: [1, 1, 1]
+
+# ── Training ──────────────────────────────────────────────────────────────────
+
+training:
+  run_name: baseline             # sub-folder under runs/{processed_leaf}/
+  seed:     42
+
+  # ── Batch & gradient accumulation ─────────────────────────────────────────
+  batch_size:           2        # physical micro-batch size
+  effective_batch_size: 2        # = batch_size  →  accum_steps = 1  (no accumulation)
+                                 # set > batch_size to enable gradient accumulation
+                                 # (must be a multiple of batch_size)
+
+  # ── Optimiser & schedule ──────────────────────────────────────────────────
+  epochs:         150
+  learning_rate:  0.00005        # 5e-5  (AdamW)
+  warmup_epochs:  0              # 0 = disabled; N > 0 = linear LR warm-up for N epochs
+
+  # ── Loss weights ──────────────────────────────────────────────────────────
+  bce_pos_weight: 20             # foreground class weight in BCE; background = 1
+                                 # NOTE: high values (>1) increase recall but risk
+                                 # over-segmentation plateau
+  dice_weight:    1.0            # multiplier on the Dice term in (dice + bce) loss
+  bce_weight:     1.0            # multiplier on the BCE term
+                                 # combined loss = dice_weight*Dice + bce_weight*BCE
+
+  # ── Deep supervision ──────────────────────────────────────────────────────
+  deep_supervision_weights: [0.1, 0.3, 0.6]   # coarse → fine decoder stages
+
+  # ── Checkpointing ─────────────────────────────────────────────────────────
+  checkpoint:
+    monitor:       dice          # metric to watch: loss | dice
+    dice_scope:    patch         # patch-level or volume-level dice (patch is faster)
+    keep:          3             # save top-k checkpoints by monitor metric
+    every:         10            # also save a periodic checkpoint every N epochs
+    volume_every:  5             # full-volume eval every N epochs (if dice_scope=volume)
+    keep_periodic: false         # delete older periodic checkpoints to save disk
+
+  # ── DataLoader ────────────────────────────────────────────────────────────
+  dataloader:
+    shuffle:      true
+    drop_last:    true
+    num_workers:  8
+    pin_memory:   true
+
+# ── Data splits ───────────────────────────────────────────────────────────────
+
+splits:
+  enabled:     true
+  train_ratio: 0.8
+  val_ratio:   0.1
+  test_ratio:  0.1
+  seed:        42
+  manifest:    data/splits.json  # cached split assignment (created on first run)
+
+# ── Experiment tracking ───────────────────────────────────────────────────────
+
+logging:
+  backend: both                  # options: none | tensorboard | wandb | both
+  tensorboard:
+    log_dir: null                # null → {run_dir}/tb_logs/
+  wandb:
+    project: voxwhisper
+    entity:  imag2               # W&B team slug (required if no default entity)
+    tags:    []
+
+# ── Inference / evaluation ────────────────────────────────────────────────────
+
+inference:
+  overlap:           0.5         # sliding-window overlap fraction
+  mode:              gaussian    # blending: gaussian | constant
+  sigma_scale:       0.125       # Gaussian kernel width (fraction of roi_size)
+  sw_batch_size:     2           # number of patches processed simultaneously
+  split:             test        # default split for pipeline/evaluate.py
+  output_dir:        data/predictions
+  checkpoint:        null        # null → auto-detect best checkpoint in run dir
+  threshold:         0.5         # sigmoid threshold for channel Dice (eval convention)
+  save_probabilities: false      # also write pred_probs.nii.gz if true
+  progress:          true        # show tqdm progress bar during sliding-window inference

@@ -139,11 +139,11 @@ class TrainingLogger:
         self._wb_run = None
         self._tb_writer = None
 
-        if backend == "wandb":
+        if backend in ("wandb", "both"):
             self._init_wandb(log_cfg.get("wandb", {}), run_name, full_config, resume)
-        elif backend == "tensorboard":
+        if backend in ("tensorboard", "both"):
             self._init_tensorboard(log_cfg.get("tensorboard", {}))
-        elif backend not in ("none", ""):
+        if backend not in ("none", "", "wandb", "tensorboard", "both"):
             logger.warning("Unknown logging.backend %r — using 'none'", backend)
 
     # ------------------------------------------------------------------
