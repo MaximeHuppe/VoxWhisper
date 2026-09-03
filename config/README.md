@@ -107,7 +107,8 @@ Bottleneck spatial size is `patch.size` divided by the product of `strides` (e.g
 |-----|---------|
 | `run_name` | Experiment folder under `runs/{processed_leaf}/` (filesystem-safe). Override per launch with `--name` |
 | `seed` | Global RNG + train patch sampling |
-| `batch_size` | Patches per step |
+| `batch_size` | Patches per GPU step (micro-batch) |
+| `effective_batch_size` | Target batch via gradient accumulation; must be a multiple of `batch_size`. Use `8` or `16` with `batch_size: 2`. Omit or set equal to `batch_size` to disable |
 | `epochs` | Cosine schedule `T_max` |
 | `learning_rate` | AdamW LR |
 | `bce_pos_weight` | BCE positive-class weight. Scalar: background=1, all tracts=`w`. Or a length-`N_T` list. `1` / omitted = unweighted |
@@ -138,6 +139,39 @@ Every epoch also writes `vox_whisper_latest.pt`.
 | `train_ratio` / `val_ratio` / `test_ratio` | Must sum to 1.0 |
 | `seed` | Split shuffle + frozen val patch centers |
 | `manifest` | JSON path (`{"train": [...], "val": [...], "test": [...]}`) |
+
+### `logging`
+
+Controls optional external experiment-tracking backends.  The JSONL file
+(`metrics.jsonl` in the run directory) is **always** written regardless of
+this setting.
+
+| Key | Meaning |
+|-----|---------|
+| `backend` | `none` (default), `tensorboard`, or `wandb` |
+
+#### `logging.tensorboard`
+
+| Key | Meaning |
+|-----|---------|
+| `log_dir` | Directory for TB event files. Defaults to `<run_dir>/tb_logs/` when `null` |
+
+View with `tensorboard --logdir runs/` — this recurses into every run and lets
+you compare them side-by-side.
+
+#### `logging.wandb`
+
+Requires `pip install wandb` and a valid API key (`wandb login`).
+
+| Key | Meaning |
+|-----|---------|
+| `project` | W&B project name (default `voxwhisper`) |
+| `entity` | W&B username or team slug; `null` uses your default |
+| `tags` | Optional list of string tags attached to the run |
+
+The full config dict is uploaded as hyperparameters automatically.
+`--resume` maps to `wandb.init(resume="allow")`, so the W&B run is
+continued rather than duplicated.
 
 ### `inference`
 

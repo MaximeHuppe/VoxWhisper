@@ -38,6 +38,43 @@ from src.training.validate import evaluate_patches, evaluate_volume_dice
 _GRAD_CLIP_NORM = 1.0
 
 
+def resolve_accumulation_steps(train_cfg: dict) -> int:
+    """Micro-batches per optimizer step from ``effective_batch_size``.
+
+    ``training.effective_batch_size`` must be a multiple of ``training.batch_size``.
+    Omitted or equal to ``batch_size`` means no accumulation (returns 1).
+    """
+    batch_size = int(train_cfg["batch_size"])
+    if batch_size < 1:
+        raise ValueError(f"training.batch_size must be >= 1, got {batch_size}")
+
+    raw = train_cfg.get("effective_batch_size", batch_size)
+    if raw is None:
+        return 1
+    effective = int(raw)
+    if effective < 1:
+        raise ValueError(
+            f"training.effective_batch_size must be >= 1, got {effective}"
+        )
+    if effective % batch_size != 0:
+        raise ValueError(
+            f"training.effective_batch_size ({effective}) must be a multiple of "
+            f"training.batch_size ({batch_size})"
+        )
+    return effective // batch_size
+
+
+def is_optimizer_step(step_index: int, n_batches: int, accum_steps: int) -> bool:
+    """True when accumulated gradients should be applied.
+
+    ``step_index`` is 1-based.  The last micro-batch of an epoch always steps
+    so leftover samples are not dropped.
+    """
+    if n_batches <= 0 or step_index <= 0:
+        return False
+    return step_index % accum_steps == 0 or step_index == n_batches
+
+
 def _print_run_header(
     config: dict,
     run_path,
@@ -60,6 +97,8 @@ def _print_run_header(
     n_train_subj = len(getattr(train_loader.dataset, "subject_ids", []))
     n_train_patches = len(train_loader.dataset)
     n_train_steps = len(train_loader)
+    accum_steps = resolve_accumulation_steps(config["training"])
+    n_opt_steps = (n_train_steps + accum_steps - 1) // accum_steps if n_train_steps else 0
 
     val_line = "—"
     if val_loader is not None:
@@ -78,8 +117,15 @@ def _print_run_header(
     print(f"  Device     {str(device):<20}  Seed     {seed}")
     warmup = train_cfg.get("warmup_epochs", 0)
     warmup_str = f"  Warmup {warmup} ep" if warmup > 0 else ""
+    batch_size = int(train_cfg["batch_size"])
+    effective = batch_size * accum_steps
+    batch_str = (
+        f"{batch_size} × {accum_steps} accum → {effective}"
+        if accum_steps > 1
+        else str(batch_size)
+    )
     print(f"  Epochs     {train_cfg['epochs']:<8}  LR  {train_cfg['learning_rate']:.2e}"
-          f"    Batch  {train_cfg['batch_size']}{warmup_str}")
+          f"    Batch  {batch_str}{warmup_str}")
     print(f"  Monitor    {describe_monitor(ckpt_cfg)}")
     print(f"  Structures {n_structs}  [{struct_preview}]")
     if model is not None:
@@ -87,8 +133,11 @@ def _print_run_header(
     print(sep)
     print(f"  Modalities primary={modalities.get('primary','?')}  "
           f"secondary={modalities.get('secondary','?')}")
+    train_steps = f"{n_train_steps} micro-steps/epoch"
+    if accum_steps > 1:
+        train_steps += f" · {n_opt_steps} optimizer steps"
     print(f"  Train      {n_train_subj} subjects · {n_train_patches} patches"
-          f" · {n_train_steps} steps/epoch")
+          f" · {train_steps}")
     print(f"  Val        {val_line}")
     print(sep)
 
@@ -200,6 +249,7 @@ def train_model(
     epochs = train_cfg["epochs"]
     learning_rate = train_cfg["learning_rate"]
     deep_sup_weights = train_cfg["deep_supervision_weights"]
+    accum_steps = resolve_accumulation_steps(train_cfg)
 
     run_path = create_or_resume_run(
         config,
@@ -258,29 +308,42 @@ def train_model(
         if restored:
             print(f"Restored {restored} top-k checkpoint entries from manifest")
 
-    with TrainingLogger(run_path, total_epochs=epochs, resume=resume) as logger:
+    with TrainingLogger(
+        run_path,
+        total_epochs=epochs,
+        resume=resume,
+        log_cfg=config.get("logging", {}),
+        run_name=train_cfg.get("run_name"),
+        full_config=config,
+    ) as logger:
         for epoch in range(start_epoch, epochs):
             model.train()
             epoch_loss = 0.0
+            n_batches = len(train_loader)
+            optimizer.zero_grad()
 
-            for primary_vol, secondary_vol, text_emb, gt_mask in train_loader:
+            for step_i, (primary_vol, secondary_vol, text_emb, gt_mask) in enumerate(
+                train_loader, start=1
+            ):
                 primary_vol = primary_vol.to(device, non_blocking=True)
                 secondary_vol = secondary_vol.to(device, non_blocking=True)
                 text_emb = text_emb.to(device, non_blocking=True)
                 gt_mask = gt_mask.to(device, non_blocking=True)
 
-                optimizer.zero_grad()
-
                 with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=use_amp):
                     predictions = model(primary_vol, secondary_vol, text_emb)
                     batch_loss = deep_supervision_loss(predictions, gt_mask, criterion, deep_sup_weights)
-                    
-                batch_loss.backward()
+                    # Scale so accumulated grads match a mean-reduced effective batch.
+                    # Dice is still computed per micro-batch, not over concatenated samples.
+                    scaled_loss = batch_loss / accum_steps
 
-                torch.nn.utils.clip_grad_norm_(model.parameters(), _GRAD_CLIP_NORM)
-
-                optimizer.step()
+                scaled_loss.backward()
                 epoch_loss += batch_loss.item()
+
+                if is_optimizer_step(step_i, n_batches, accum_steps):
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), _GRAD_CLIP_NORM)
+                    optimizer.step()
+                    optimizer.zero_grad()
 
             scheduler.step()
             avg_loss = epoch_loss / len(train_loader) if len(train_loader) > 0 else epoch_loss

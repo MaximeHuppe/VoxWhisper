@@ -65,6 +65,7 @@ training:
   run_name: baseline         # folder under runs/{processed_leaf}/; override with --name
   seed: 42
   batch_size: 2
+  effective_batch_size: 8    # 8 or 16; must be a multiple of batch_size (accum = this / batch_size)
   epochs: 150
   learning_rate: 0.00005
   warmup_epochs: 10             # linear LR warmup; 0 = disabled
@@ -92,6 +93,17 @@ splits:
   test_ratio: 0.1
   seed: 42
   manifest: data/splits.json
+
+logging:
+  # Backend for experiment tracking.  Options: none | tensorboard | wandb
+  backend: none
+  tensorboard:
+    # Defaults to <run_dir>/tb_logs/ when null.  Run: tensorboard --logdir runs/
+    log_dir: null
+  wandb:
+    project: voxwhisper
+    entity: null       # W&B username or team; null uses your default
+    tags: []
 
 inference:
   overlap: 0.5

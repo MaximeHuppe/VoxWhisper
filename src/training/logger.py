@@ -33,15 +33,58 @@ while training::
 
     Ep   1/150  loss 1.0421  val_loss 0.8910  dice_patch 0.1832  lr 5.00e-05
     Ep   5/150  loss 0.9102  val_loss 0.8121  dice_patch 0.2210  dice_vol 0.198  lr 4.98e-05  [top-2]
+
+External backends (optional)
+-----------------------------
+Controlled by ``config["logging"]["backend"]``:
+
+* ``"tensorboard"`` — writes a TensorBoard ``SummaryWriter`` under
+  ``<run_dir>/tb_logs/``.  Launch with::
+
+      tensorboard --logdir runs/
+
+* ``"wandb"`` — logs to Weights & Biases.  Requires ``wandb`` installed
+  and a valid API key (``wandb login``).  Project and entity are taken
+  from ``config["logging"]["wandb"]``.
+
+* ``"none"`` (default) — JSONL + stdout only.
+
+Both backends are additive: the JSONL file is always written.
 """
 from __future__ import annotations
 
 import json
+import logging
 import time
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+logger = logging.getLogger(__name__)
+
 METRICS_FILENAME = "metrics.jsonl"
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _flatten_metrics(metrics: Dict[str, Any], prefix: str = "") -> Dict[str, float]:
+    """Recursively flatten nested metric dicts using '/' as separator.
+
+    ``{"dice_patch_classes": {"ATR_left": 0.9}}``
+    →  ``{"dice_patch_classes/ATR_left": 0.9}``
+    """
+    flat: Dict[str, float] = {}
+    for k, v in metrics.items():
+        key = f"{prefix}{k}" if prefix else k
+        if isinstance(v, dict):
+            flat.update(_flatten_metrics(v, prefix=f"{key}/"))
+        else:
+            try:
+                flat[key] = float(v)
+            except (TypeError, ValueError):
+                pass
+    return flat
 
 
 def _jsonify_metric(value: Any) -> Any:
@@ -62,11 +105,17 @@ def _format_class_dice(class_scores: Dict[str, float]) -> str:
 class TrainingLogger:
     """Write per-epoch metrics to JSONL and print a compact stdout table row.
 
+    Optionally mirrors metrics to TensorBoard or Weights & Biases when
+    ``log_cfg`` (from ``config["logging"]``) is provided.
+
     Parameters
     ----------
-    run_dir : directory where ``metrics.jsonl`` is written.
+    run_dir      : directory where ``metrics.jsonl`` is written.
     total_epochs : total number of training epochs (used for the epoch column width).
-    resume : if ``True``, append to an existing metrics file rather than truncating.
+    resume       : if ``True``, append to an existing metrics file rather than truncating.
+    log_cfg      : ``config["logging"]`` dict; controls external backend selection.
+    run_name     : human-readable run identifier forwarded to W&B / TB.
+    full_config  : entire config dict logged as W&B hyperparameters.
     """
 
     def __init__(
@@ -74,15 +123,85 @@ class TrainingLogger:
         run_dir: Path,
         total_epochs: int,
         resume: bool = False,
+        *,
+        log_cfg: Optional[Dict[str, Any]] = None,
+        run_name: Optional[str] = None,
+        full_config: Optional[Dict[str, Any]] = None,
     ) -> None:
         self.run_dir = Path(run_dir)
         self.total_epochs = total_epochs
         self._start_time = time.monotonic()
         self._file = self._open(resume)
 
+        log_cfg = log_cfg or {}
+        backend = str(log_cfg.get("backend", "none")).lower()
+
+        self._wb_run = None
+        self._tb_writer = None
+
+        if backend == "wandb":
+            self._init_wandb(log_cfg.get("wandb", {}), run_name, full_config, resume)
+        elif backend == "tensorboard":
+            self._init_tensorboard(log_cfg.get("tensorboard", {}))
+        elif backend not in ("none", ""):
+            logger.warning("Unknown logging.backend %r — using 'none'", backend)
+
     # ------------------------------------------------------------------
     # Construction helpers
     # ------------------------------------------------------------------
+
+    def _init_wandb(
+        self,
+        wb_cfg: Dict[str, Any],
+        run_name: Optional[str],
+        full_config: Optional[Dict[str, Any]],
+        resume: bool,
+    ) -> None:
+        try:
+            import wandb  # type: ignore
+        except ImportError:
+            logger.warning(
+                "W&B backend requested but 'wandb' is not installed. "
+                "Run: pip install wandb"
+            )
+            return
+
+        project = wb_cfg.get("project", "voxwhisper")
+        entity = wb_cfg.get("entity") or None  # None → W&B default
+        tags = wb_cfg.get("tags") or []
+
+        try:
+            self._wb_run = wandb.init(
+                project=project,
+                entity=entity,
+                name=run_name,
+                tags=tags,
+                config=full_config,
+                resume="allow" if resume else None,
+                dir=str(self.run_dir),
+            )
+            logger.info("W&B run initialised: %s", self._wb_run.url if self._wb_run else "?")
+        except Exception as exc:
+            logger.warning("W&B init failed (%s) — continuing without W&B", exc)
+            self._wb_run = None
+
+    def _init_tensorboard(self, tb_cfg: Dict[str, Any]) -> None:
+        try:
+            from torch.utils.tensorboard import SummaryWriter  # type: ignore
+        except ImportError:
+            logger.warning(
+                "TensorBoard backend requested but 'tensorboard' is not installed. "
+                "Run: pip install tensorboard"
+            )
+            return
+
+        log_dir = tb_cfg.get("log_dir") or str(self.run_dir / "tb_logs")
+        try:
+            self._tb_writer = SummaryWriter(log_dir=log_dir)
+            logger.info("TensorBoard SummaryWriter at %s", log_dir)
+        except Exception as exc:
+            logger.warning("TensorBoard init failed (%s) — continuing without TensorBoard", exc)
+            self._tb_writer = None
 
     def _open(self, resume: bool):
         self.run_dir.mkdir(parents=True, exist_ok=True)
@@ -134,11 +253,45 @@ class TrainingLogger:
         self._file.flush()
 
         self._print_row(epoch, metrics, lr, rank)
+        self._log_external(epoch, metrics, lr)
+
+    def _log_external(
+        self,
+        epoch: int,
+        metrics: Dict[str, Any],
+        lr: float,
+    ) -> None:
+        """Mirror metrics to W&B / TensorBoard if a backend is active."""
+        flat = _flatten_metrics(metrics)
+        flat["lr"] = lr
+
+        if self._wb_run is not None:
+            try:
+                self._wb_run.log(flat, step=epoch)
+            except Exception as exc:
+                logger.debug("W&B log failed: %s", exc)
+
+        if self._tb_writer is not None:
+            try:
+                for tag, value in flat.items():
+                    self._tb_writer.add_scalar(tag, value, global_step=epoch)
+            except Exception as exc:
+                logger.debug("TensorBoard log failed: %s", exc)
 
     def close(self) -> None:
-        """Flush and close the log file."""
+        """Flush and close the log file, and finish any external backend."""
         self._file.flush()
         self._file.close()
+        if self._tb_writer is not None:
+            try:
+                self._tb_writer.close()
+            except Exception:
+                pass
+        if self._wb_run is not None:
+            try:
+                self._wb_run.finish()
+            except Exception:
+                pass
 
     def __enter__(self):
         return self
