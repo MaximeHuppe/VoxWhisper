@@ -69,6 +69,8 @@ training:
   learning_rate: 0.00005
   warmup_epochs: 10             # linear LR warmup; 0 = disabled
   bce_pos_weight: 20         # foreground BCE weight; background stays 1
+  dice_weight: 1.0
+  bce_weight: 0.5
   deep_supervision_weights: [0.1, 0.3, 0.6]
   checkpoint:
     monitor: dice          # loss | dice

@@ -102,7 +102,11 @@ class DiceBCELoss(nn.Module):
         self,
         eps: float = 1e-5,
         pos_weight: Optional[torch.Tensor] = None,
+        bce_weight: float = 1.0,
+        dice_weight: float = 1.0,
     ) -> None:
+
+
         super().__init__()
         self.eps = eps
         if pos_weight is None:
@@ -114,11 +118,14 @@ class DiceBCELoss(nn.Module):
                     f"pos_weight must be 1-D [N_T], got shape {tuple(weight.shape)}"
                 )
             self.register_buffer("pos_weight", weight)
-
+        self.bce_weight = bce_weight
+        self.dice_weight = dice_weight
     @classmethod
     def from_config(cls, config: dict, n_channels: int) -> "DiceBCELoss":
         spec = config.get("training", {}).get("bce_pos_weight", 1.0)
-        return cls(pos_weight=build_pos_weight(n_channels, spec))
+        bce_weight = config.get("training", {}).get("bce_weight", 1.0)
+        dice_weight = config.get("training", {}).get("dice_weight", 1.0)
+        return cls(pos_weight=build_pos_weight(n_channels, spec), bce_weight=bce_weight, dice_weight=dice_weight)
 
     def forward(self, pred_logits: torch.Tensor, target_mask: torch.Tensor) -> torch.Tensor:
         """
@@ -168,7 +175,7 @@ class DiceBCELoss(nn.Module):
             union = pred_flat.sum() + tgt_flat.sum()
             dice_loss = 1.0 - (2.0 * intersection + self.eps) / (union + self.eps)
 
-        return bce_loss + dice_loss
+        return self.bce_weight * bce_loss + self.dice_weight * dice_loss
 
 
 def deep_supervision_loss(

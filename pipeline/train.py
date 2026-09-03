@@ -76,8 +76,10 @@ def _print_run_header(
     print(sep)
     print(f"  Run        {run_path}")
     print(f"  Device     {str(device):<20}  Seed     {seed}")
+    warmup = train_cfg.get("warmup_epochs", 0)
+    warmup_str = f"  Warmup {warmup} ep" if warmup > 0 else ""
     print(f"  Epochs     {train_cfg['epochs']:<8}  LR  {train_cfg['learning_rate']:.2e}"
-          f"    Batch  {train_cfg['batch_size']}")
+          f"    Batch  {train_cfg['batch_size']}{warmup_str}")
     print(f"  Monitor    {describe_monitor(ckpt_cfg)}")
     print(f"  Structures {n_structs}  [{struct_preview}]")
     if model is not None:
@@ -192,6 +194,9 @@ def train_model(
         else "cpu"
     )
 
+    use_amp = device.type == "cuda"
+    amp_dtype = torch.bfloat16
+
     epochs = train_cfg["epochs"]
     learning_rate = train_cfg["learning_rate"]
     deep_sup_weights = train_cfg["deep_supervision_weights"]
@@ -259,14 +264,17 @@ def train_model(
             epoch_loss = 0.0
 
             for primary_vol, secondary_vol, text_emb, gt_mask in train_loader:
-                primary_vol = primary_vol.to(device)
-                secondary_vol = secondary_vol.to(device)
-                text_emb = text_emb.to(device)
-                gt_mask = gt_mask.to(device)
+                primary_vol = primary_vol.to(device, non_blocking=True)
+                secondary_vol = secondary_vol.to(device, non_blocking=True)
+                text_emb = text_emb.to(device, non_blocking=True)
+                gt_mask = gt_mask.to(device, non_blocking=True)
 
                 optimizer.zero_grad()
-                predictions = model(primary_vol, secondary_vol, text_emb)
-                batch_loss = deep_supervision_loss(predictions, gt_mask, criterion, deep_sup_weights)
+
+                with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=use_amp):
+                    predictions = model(primary_vol, secondary_vol, text_emb)
+                    batch_loss = deep_supervision_loss(predictions, gt_mask, criterion, deep_sup_weights)
+                    
                 batch_loss.backward()
 
                 torch.nn.utils.clip_grad_norm_(model.parameters(), _GRAD_CLIP_NORM)
