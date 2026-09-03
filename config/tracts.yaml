@@ -20,6 +20,9 @@ data:
       filename: average_b0.nii.gz
     fa:
       filename: dti_FA.nii.gz
+    dec_fa:
+      filename: dti_DEC_FA.nii.gz
+      normalize: false           # RGB is already FA-weighted in [0, 1]
 
   masks:
     source: tract_masks_1.25

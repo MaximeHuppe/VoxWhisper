@@ -4,23 +4,32 @@
 Pipeline overview
 -----------------
 The steps below must be run in order.  Step 0 is only needed when the
-secondary modality is ``fa``; it is skipped automatically for ``b0``.
+secondary modality is ``fa`` or ``dec_fa``; it is skipped automatically
+for ``b0`` / ``t2``.
 
-Step 0  (optional) — FA map generation
-    ``python preprocess/compute_fa.py --config config/tracts.yaml``
+Step 0  (optional) — DTI-derived maps
+    Scalar FA::
 
-    Reads each subject's 4D diffusion series from
-    ``data/raw/{subject_id}/Diffusion/`` and writes a 3D FA map to
-    ``data/raw/{subject_id}/dti_FA.nii.gz``.  Run this once before Steps 1–4.
+        python preprocess/compute_fa.py --config config/tracts.yaml
+
+    3-channel DEC-FA (RGB, principal-direction colouring)::
+
+        python preprocess/compute_dec_fa.py --config config/tracts.yaml
+
+    Both read each subject's 4D diffusion series from
+    ``data/raw/{subject_id}/Diffusion/`` and write a map to the subject
+    root (``dti_FA.nii.gz`` or ``dti_DEC_FA.nii.gz``).  Run once before
+    Steps 1–4.
 
     Add ``--delete-raw`` to remove ``Diffusion/data.nii.gz`` afterwards and
     reclaim ~1–2 GB per subject.  Add ``--workers N`` to parallelise across
     subjects.
 
 Step 1 — preprocess volumes
-    Loads T1 / B0 / FA from ``data/raw/``, applies z-score normalisation,
-    and writes ``{primary}.nii.gz`` and ``{secondary}.nii.gz`` to the
-    processed directory.
+    Loads T1 / B0 / FA / DEC-FA from ``data/raw/``, applies z-score
+    normalisation (skipped when ``data.volumes.<mod>.normalize`` is false,
+    as for DEC-FA), and writes ``{primary}.nii.gz`` and
+    ``{secondary}.nii.gz`` to the processed directory.
 
 Step 2 — preprocess masks
     Merges per-tract binary masks from ``tract_masks_1.25/`` into a single
@@ -35,7 +44,7 @@ Step 4 — cache prompt embeddings
     cache file used by the DataLoader.
 
 This script runs Steps 1–4 in sequence.  Run Step 0 manually beforehand
-when ``data.modalities.secondary: fa`` is set in the config.
+when ``data.modalities.secondary`` is ``fa`` or ``dec_fa``.
 """
 from __future__ import annotations
 
@@ -80,30 +89,37 @@ def drop_incomplete_processed(config) -> list[str]:
     return removed
 
 
+_DTI_SECONDARY = {
+    "fa": ("dti_FA.nii.gz", "preprocess/compute_fa.py"),
+    "dec_fa": ("dti_DEC_FA.nii.gz", "preprocess/compute_dec_fa.py"),
+}
+
+
 def _warn_if_fa_needed(config) -> None:
-    """Print a reminder when FA is the secondary modality but no FA maps exist."""
+    """Print a reminder when a DTI-derived secondary map is missing on disk."""
     _, secondary = active_modality_keys(config)
-    if secondary != "fa":
+    if secondary not in _DTI_SECONDARY:
         return
+    filename, script = _DTI_SECONDARY[secondary]
     raw_dir = resolve_path(config, "data.paths.raw")
     if not raw_dir.is_dir():
         return
     subjects = [d for d in raw_dir.iterdir() if d.is_dir() and d.name.isdigit()]
-    missing = [s for s in subjects if not (s / "dti_FA.nii.gz").exists()]
+    missing = [s for s in subjects if not (s / filename).exists()]
     if missing:
         print(
-            f"[Warning] {len(missing)} subject(s) have no dti_FA.nii.gz "
-            f"but secondary modality is 'fa'.  Run Step 0 first:\n"
-            f"  python preprocess/compute_fa.py --config <your_config.yaml>\n"
+            f"[Warning] {len(missing)} subject(s) have no {filename} "
+            f"but secondary modality is '{secondary}'.  Run Step 0 first:\n"
+            f"  python {script} --config <your_config.yaml>\n"
         )
 
 
 def run_preprocess(config) -> None:
     """Run Steps 1–4 of the preprocessing pipeline.
 
-    Step 0 (FA map generation) is optional and must be run separately
-    when ``data.modalities.secondary`` is ``fa``.  See the module docstring
-    for the full pipeline overview.
+    Step 0 (FA / DEC-FA map generation) is optional and must be run
+    separately when ``data.modalities.secondary`` is ``fa`` or ``dec_fa``.
+    See the module docstring for the full pipeline overview.
     """
     _warn_if_fa_needed(config)
     print("=== Step 1/4: preprocess volumes ===")

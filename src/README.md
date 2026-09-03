@@ -37,7 +37,7 @@ secondary_volume ► secondary_encoder ► bottleneck (skips discarded)
 
 Positional encodings are sized from `patch.size` and encoder `strides` in `from_config`. If a forward pass sees a different bottleneck size, the PE grid is trilinearly interpolated.
 
-**Secondary channels.** `model.input_channels` feeds the primary encoder; optional `model.secondary_encoder.input_channels` can differ (e.g. multi-channel MD later). Old checkpoints that used `t1_encoder` / `t2_encoder` keys are remapped in `utils/checkpoint.py`.
+**Secondary channels.** `model.input_channels` feeds the primary encoder; optional `model.secondary_encoder.input_channels` can differ (set to `3` for DEC-FA). Old checkpoints that used `t1_encoder` / `t2_encoder` keys are remapped in `utils/checkpoint.py`.
 
 ## How the dataset is generated
 
@@ -50,7 +50,7 @@ Per subject under `data/processed/{subject_id}/`:
 | File | Content |
 |------|---------|
 | `{primary}.nii.gz` | e.g. `t1.nii.gz` — z-scored structural |
-| `{secondary}.nii.gz` | e.g. `t2.nii.gz` — same grid as primary |
+| `{secondary}.nii.gz` | e.g. `t2.nii.gz` / `fa.nii.gz` (3D) or `dec_fa.nii.gz` (4D RGB) — same spatial grid as primary |
 | `mask.nii.gz` | Integer labels (0 = background, 1…K = tracts from `structures.json`) |
 
 Plus a shared prompt tensor at `cache/{text_encoder.cache_file}` with shape `[N_T, text_dim]` (one mean-pooled embedding per prompt, including background).
@@ -68,7 +68,7 @@ Filenames on disk follow `data.modalities.primary` / `secondary` (and `data.volu
 
 Each item is `(primary, secondary, text_embeddings, gt_mask)`:
 
-- volumes: `[1, D, H, W]` float
+- volumes: `[C, D, H, W]` float (`C=1` for scalar T1/FA; `C=3` for DEC-FA)
 - text: `[N_T, text_dim]` (shared cache, not subject-specific)
 - mask: `[N_T, D, H, W]` one-hot float from the integer label map
 

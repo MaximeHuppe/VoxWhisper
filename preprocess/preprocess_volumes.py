@@ -87,9 +87,13 @@ def process_subject(subject_id, raw_dir, output_dir, config):
             return
 
         # 4.2. Load and process the volume
-        volume, affine = load_and_process_volume(
-            path, normalization=normalization, nonzero_only=nonzero_only
-        )
+        do_normalize = bool(vol_cfg.get("normalize", True))
+        if do_normalize:
+            volume, affine = load_and_process_volume(
+                path, normalization=normalization, nonzero_only=nonzero_only
+            )
+        else:
+            volume, affine = load_nifti(path)
 
         # 4.3. Save the volume
         out_file = volume_path(output_dir, subject_id, modality)

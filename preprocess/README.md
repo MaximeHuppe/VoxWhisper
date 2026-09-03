@@ -35,6 +35,30 @@ Downloads structural volumes from an S3 HCP-style bucket for subjects that alrea
 
 This is not part of `pipeline/run_preprocess.py`. Documented so you do not expect a one-line toggle in the default config.
 
+### `compute_fa.py` / `compute_dec_fa.py` (Step 0)
+
+Fit a DTI model on each subject's `Diffusion/data.nii.gz` and write a map at the subject root:
+
+| Script | Output | Shape |
+|--------|--------|-------|
+| `compute_fa.py` | `dti_FA.nii.gz` | 3D scalar FA |
+| `compute_dec_fa.py` | `dti_DEC_FA.nii.gz` | 4D RGB DEC-FA `(D, H, W, 3)` |
+
+DEC-FA colours the principal eigenvector by FA (Pajevic & Pierpaoli): R = \|e1ₓ\|·FA, G = \|e1ᵧ\|·FA, B = \|e1_z\|·FA. Do not z-score it (`data.volumes.dec_fa.normalize: false`). `compute_dec_fa.py` also writes scalar FA if it is missing.
+
+```bash
+python preprocess/compute_dec_fa.py --config config/tracts.yaml
+python preprocess/compute_dec_fa.py --config config/tracts.yaml --subject 599469 --workers 4
+```
+
+Then point the experiment at it:
+
+```yaml
+data.modalities.secondary: dec_fa
+data.paths.processed: data/processed_T1_DEC_FA
+model.secondary_encoder.input_channels: 3
+```
+
 ### `preprocess_volumes.py`
 
 For each subject and each of `data.modalities.primary` / `secondary`:

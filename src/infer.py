@@ -9,7 +9,7 @@ import torch.nn as nn
 from monai.inferers import sliding_window_inference
 
 from src.utils.config import resolve_path
-from src.data.nifti_io import load_nifti, mask_path, volume_path
+from src.data.nifti_io import as_channel_first, load_nifti, mask_path, spatial_shape, volume_path
 
 RoiSize = Union[Sequence[int], int]
 
@@ -164,7 +164,7 @@ def load_subject_for_inference(
 
     Returns
     -------
-    primary, secondary : float32 arrays ``(D, H, W)``
+    primary, secondary : float32 arrays ``(D, H, W)`` or ``(D, H, W, C)``
     labels : int16 array ``(D, H, W)`` or ``None`` if no mask is on disk
     affine : (4, 4) voxel-to-world matrix from the primary NIfTI
     """
@@ -175,9 +175,9 @@ def load_subject_for_inference(
 
     primary, affine = load_nifti(volume_path(processed_dir, subject_id, primary_key))
     secondary, _ = load_nifti(volume_path(processed_dir, subject_id, secondary_key))
-    if primary.shape != secondary.shape:
+    if spatial_shape(primary) != spatial_shape(secondary):
         raise ValueError(
-            f"Primary/secondary shape mismatch for {subject_id}: "
+            f"Primary/secondary spatial shape mismatch for {subject_id}: "
             f"{primary.shape} vs {secondary.shape}"
         )
 
@@ -187,10 +187,10 @@ def load_subject_for_inference(
         labels_f, _ = load_nifti(mpath)
         if labels_f.ndim != 3:
             raise ValueError(f"Expected 3D mask at {mpath}, got {labels_f.shape}")
-        if labels_f.shape != primary.shape:
+        if spatial_shape(labels_f) != spatial_shape(primary):
             raise ValueError(
-                f"Mask shape {labels_f.shape} != primary shape {primary.shape} "
-                f"for {subject_id}"
+                f"Mask shape {labels_f.shape} != primary spatial shape "
+                f"{spatial_shape(primary)} for {subject_id}"
             )
         labels = np.rint(labels_f).astype(np.int16)
 
@@ -200,9 +200,9 @@ def load_subject_for_inference(
 def volumes_to_tensors(
     primary: np.ndarray, secondary: np.ndarray
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    """``(D, H, W)`` NumPy → ``[1, 1, D, H, W]`` float tensors."""
-    primary_t = torch.from_numpy(np.ascontiguousarray(primary)).float().unsqueeze(0).unsqueeze(0)
-    secondary_t = torch.from_numpy(np.ascontiguousarray(secondary)).float().unsqueeze(0).unsqueeze(0)
+    """``(D, H, W)`` or ``(D, H, W, C)`` NumPy → ``[1, C, D, H, W]`` float tensors."""
+    primary_t = torch.from_numpy(as_channel_first(primary)).float().unsqueeze(0)
+    secondary_t = torch.from_numpy(as_channel_first(secondary)).float().unsqueeze(0)
     return primary_t, secondary_t
 
 

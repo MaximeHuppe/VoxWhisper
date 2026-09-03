@@ -35,7 +35,7 @@ Order of channels follows ascending `label`. Foreground entries without a matchi
 | Key | Meaning |
 |-----|---------|
 | `primary` | Modality key used as output space and skip source (e.g. `t1`) |
-| `secondary` | Second encoder input (e.g. `t2`; switch to MD by changing this + adding a `volumes` entry) |
+| `secondary` | Second encoder input (e.g. `fa`, `t2`, `dec_fa`) |
 
 These keys must match entries under `data.volumes` and become filenames `{key}.nii.gz` under each processed subject.
 
@@ -44,6 +44,7 @@ These keys must match entries under `data.volumes` and become filenames `{key}.n
 | Key | Meaning |
 |-----|---------|
 | `filename` | Raw NIfTI name under `{raw}/{subject}/T1w/` (or `{raw}/{subject}/`) |
+| `normalize` | Optional. If `false`, copy the volume without z-score/minmax (required for DEC-FA so RGB stays in `[0, 1]`) |
 
 `t1` / `t2` here are **on-disk modality ids**, not the Python API names (`primary` / `secondary`).
 

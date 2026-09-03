@@ -21,18 +21,44 @@ def load_nifti(path: PathLike) -> Tuple[np.ndarray, np.ndarray]:
     return data, img.affine
 
 
+def spatial_shape(volume: np.ndarray) -> Tuple[int, int, int]:
+    """Return ``(D, H, W)`` for a 3D volume or a 4D ``(D, H, W, C)`` volume."""
+    if volume.ndim not in (3, 4):
+        raise ValueError(f"Expected 3D or 4D volume, got shape {volume.shape}")
+    d, h, w = volume.shape[:3]
+    return int(d), int(h), int(w)
+
+
+def as_channel_first(volume: np.ndarray) -> np.ndarray:
+    """Convert ``(D, H, W)`` or ``(D, H, W, C)`` to contiguous ``(C, D, H, W)``."""
+    if volume.ndim == 3:
+        return np.ascontiguousarray(volume[np.newaxis, ...])
+    if volume.ndim == 4:
+        return np.ascontiguousarray(np.moveaxis(volume, -1, 0))
+    raise ValueError(f"Expected 3D or 4D volume, got shape {volume.shape}")
+
+
 def normalize_intensity(
     volume: np.ndarray,
     method: str = "zscore",
     nonzero_only: bool = True,
 ) -> np.ndarray:
     """
-    Normalize a 3D volume.
+    Normalize a 3D volume, or a 4D volume channel-wise.
 
     For ``zscore`` with ``nonzero_only=True``, mean/std are computed on
     voxels with absolute value > 0 (simple foreground / non-air mask).
+    4D ``(D, H, W, C)`` inputs (e.g. DEC-FA) are normalized independently
+    per channel.  Prefer ``normalize: false`` on RGB volumes so the
+    directional colour encoding is preserved.
     """
     volume = volume.astype(np.float32, copy=False)
+    if volume.ndim == 4:
+        channels = [
+            normalize_intensity(volume[..., c], method=method, nonzero_only=nonzero_only)
+            for c in range(volume.shape[-1])
+        ]
+        return np.stack(channels, axis=-1)
 
     if method == "minmax":
         if nonzero_only:
@@ -211,7 +237,7 @@ def extract_patch_3d(
     Parameters
     ----------
     volume : np.ndarray
-        3D array ``(D, H, W)``.
+        3D array ``(D, H, W)`` or 4D array ``(D, H, W, C)``.
     center : (z, y, x)
         Patch center in volume coordinates.
     patch_size : (pz, py, px)
@@ -220,12 +246,15 @@ def extract_patch_3d(
     Returns
     -------
     patch : np.ndarray
-        Array of shape ``patch_size`` (same dtype as ``volume``).
+        Array of shape ``patch_size`` (3D) or ``(*patch_size, C)`` (4D),
+        same dtype as ``volume``.
     """
 
-    # 1. Check if the volume is 3D
-    if volume.ndim != 3:
-        raise ValueError(f"extract_patch_3d expects 3D volume, got shape {volume.shape}")
+    # 1. Check if the volume is 3D or 4D (D, H, W[, C])
+    if volume.ndim not in (3, 4):
+        raise ValueError(f"extract_patch_3d expects 3D or 4D volume, got shape {volume.shape}")
+
+    spatial = spatial_shape(volume)
 
     # 2. Convert the patch size to integers
     patch_size = tuple(int(x) for x in patch_size)
@@ -234,7 +263,10 @@ def extract_patch_3d(
     center = [int(c) for c in center]
 
     # 4. Create an output array of the same shape as the patch size
-    output = np.zeros(patch_size, dtype=volume.dtype)
+    if volume.ndim == 3:
+        output = np.zeros(patch_size, dtype=volume.dtype)
+    else:
+        output = np.zeros((*patch_size, volume.shape[3]), dtype=volume.dtype)
 
     # 5. Create source and destination slices
     src_slices = []
@@ -247,9 +279,9 @@ def extract_patch_3d(
         src_end = src_start + patch_size[i]
 
         dst_start = max(0, -src_start)
-        dst_end = patch_size[i] - max(0, src_end - volume.shape[i])
+        dst_end = patch_size[i] - max(0, src_end - spatial[i])
         src_start_clipped = max(0, src_start)
-        src_end_clipped = min(volume.shape[i], src_end)
+        src_end_clipped = min(spatial[i], src_end)
 
         src_slices.append(slice(src_start_clipped, src_end_clipped))
         dst_slices.append(slice(dst_start, dst_end))

@@ -17,7 +17,13 @@ Runs in order:
 3. Drop processed subject folders missing primary, secondary, or `mask.nii.gz`
 4. `cache_embedding` — PubMedBERT prompt tensor under `data.paths.cache`
 
-Does **not** download HCP data; use `preprocess/extract_hcp.py` separately if needed.
+Does **not** download HCP data; use `preprocess/extract_hcp.py` separately if needed. When the secondary modality is `fa` or `dec_fa`, run Step 0 first:
+
+```bash
+python preprocess/compute_fa.py --config config/tracts.yaml
+# or
+python preprocess/compute_dec_fa.py --config config/tracts.yaml
+```
 
 ### Train
 

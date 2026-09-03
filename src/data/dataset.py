@@ -12,12 +12,14 @@ from torch.utils.data import Dataset
 
 from src.utils.config import active_modality_keys, resolve_path
 from src.data.nifti_io import (
+    as_channel_first,
     extract_patch_3d,
     label_to_multichannel,
     list_subject_ids,
     load_nifti,
     mask_path,
     random_valid_center,
+    spatial_shape,
     volume_path,
 )
 from src.utils.seed import get_training_seed
@@ -179,8 +181,8 @@ class VoxWhisperDataset(Dataset):
         if not path.exists():
             raise FileNotFoundError(f"Missing volume: {path}")
         data, _ = load_nifti(path)
-        if data.ndim != 3:
-            raise ValueError(f"Expected 3D volume at {path}, got shape {data.shape}")
+        if data.ndim not in (3, 4):
+            raise ValueError(f"Expected 3D or 4D volume at {path}, got shape {data.shape}")
         return data
 
     def _load_label_np(self, subject_id: str, spatial_shape: Tuple[int, int, int]) -> np.ndarray:
@@ -201,12 +203,13 @@ class VoxWhisperDataset(Dataset):
     def _load_subject(self, subject_id: str) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         primary_full = self._load_volume_np(subject_id, self.primary)
         secondary_full = self._load_volume_np(subject_id, self.secondary)
-        if primary_full.shape != secondary_full.shape:
+        primary_spatial = spatial_shape(primary_full)
+        if primary_spatial != spatial_shape(secondary_full):
             raise ValueError(
-                f"Primary/secondary shape mismatch for {subject_id}: "
+                f"Primary/secondary spatial shape mismatch for {subject_id}: "
                 f"{primary_full.shape} vs {secondary_full.shape}"
             )
-        labels_full = self._load_label_np(subject_id, primary_full.shape)
+        labels_full = self._load_label_np(subject_id, primary_spatial)
         return primary_full, secondary_full, labels_full
 
     def _cached_subject(self, subject_id: str) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -257,7 +260,7 @@ class VoxWhisperDataset(Dataset):
         items: List[Tuple[str, Center]] = []
         for sid in self.subject_ids:
             primary = self._load_volume_np(sid, self.primary)
-            labels = self._load_label_np(sid, primary.shape)
+            labels = self._load_label_np(sid, spatial_shape(primary))
             for center in self._frozen_centers(labels, rng):
                 items.append((sid, center))
         return items
@@ -329,8 +332,8 @@ class VoxWhisperDataset(Dataset):
 
         gt_mask = label_to_multichannel(label_patch, self.n_prompts)
 
-        primary_vol = torch.from_numpy(primary_patch).float().unsqueeze(0)
-        secondary_vol = torch.from_numpy(secondary_patch).float().unsqueeze(0)
+        primary_vol = torch.from_numpy(as_channel_first(primary_patch)).float()
+        secondary_vol = torch.from_numpy(as_channel_first(secondary_patch)).float()
         gt_mask_t = torch.from_numpy(gt_mask).float()
 
         return primary_vol, secondary_vol, self.text_embeddings, gt_mask_t

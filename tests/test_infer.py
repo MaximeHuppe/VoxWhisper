@@ -3,12 +3,13 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+import numpy as np
 import torch
 import torch.nn as nn
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from src.infer import SlidingWindowPredictor, predict_full_volume
+from src.infer import SlidingWindowPredictor, predict_full_volume, volumes_to_tensors
 from src.training.metrics import per_class_dice
 
 
@@ -91,6 +92,28 @@ def test_gaussian_blend_reconstructs_agreed_voxels():
 
     assert logits.shape == (1, 1, 48, 48, 48)
     torch.testing.assert_close(logits, primary, rtol=1e-4, atol=1e-4)
+
+
+def test_extract_patch_3d_keeps_rgb_channels():
+    from src.data.nifti_io import extract_patch_3d
+
+    volume = np.zeros((10, 10, 10, 3), dtype=np.float32)
+    volume[4, 5, 6, 1] = 0.75
+    patch = extract_patch_3d(volume, center=(4, 5, 6), patch_size=(4, 4, 4))
+    assert patch.shape == (4, 4, 4, 3)
+    assert float(patch[2, 2, 2, 1]) == 0.75
+    assert float(patch[2, 2, 2, 0]) == 0.0
+
+
+def test_volumes_to_tensors_rgb_secondary():
+    primary = np.zeros((8, 8, 8), dtype=np.float32)
+    secondary = np.zeros((8, 8, 8, 3), dtype=np.float32)
+    secondary[..., 0] = 1.0
+    p, s = volumes_to_tensors(primary, secondary)
+    assert tuple(p.shape) == (1, 1, 8, 8, 8)
+    assert tuple(s.shape) == (1, 3, 8, 8, 8)
+    assert float(s[0, 0].mean()) == 1.0
+    assert float(s[0, 1].mean()) == 0.0
 
 
 def test_mismatched_primary_secondary_shapes_raise():
