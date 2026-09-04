@@ -34,7 +34,10 @@ def base_config() -> dict:
             "masks": {
                 "structures": "config/structures_dense.json",
             },
-            "nerve_masks": {"source": "nerve_masks_1.25"},
+            "nerve_masks": {
+                "root": "",
+                "source": "tract_masks_1.25",
+            },
             "prompts": ["background", "left_thalamus", "right_thalamus", "brainstem"],
             "structure_names": ["background", "left_thalamus", "right_thalamus", "brainstem"],
             "patch": {
@@ -116,6 +119,7 @@ def tmp_config(tmp_path: Path, base_config: dict) -> dict:
     cfg["data"]["paths"]["raw"] = str(tmp_path / "raw")
     cfg["data"]["paths"]["runs"] = str(tmp_path / "runs")
     cfg["data"]["paths"]["cache"] = str(tmp_path / "cache")
+    cfg["data"]["nerve_masks"]["root"] = str(tmp_path / "nerve_raw")
     cfg["splits"]["manifest"] = str(tmp_path / "splits.json")
     cfg["splits"]["subject_split"] = str(tmp_path / "subject_split.json")
     return cfg

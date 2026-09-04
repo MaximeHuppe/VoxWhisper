@@ -16,17 +16,30 @@ def _as_repo_path(rel: str) -> Path:
 
 
 def list_raw_subject_ids(config: Mapping) -> list[str]:
-    """Subject folders under ``data.paths.raw``."""
+    """Subject folders under ``data.paths.raw`` (volume root, e.g. HCP)."""
     raw_dir = resolve_path(config, "data.paths.raw")
     if not raw_dir.exists():
         return []
     return sorted(d.name for d in raw_dir.iterdir() if d.is_dir())
 
 
-def subject_has_nerve_masks(raw_dir: Path, subject_id: str, source: str) -> bool:
-    """True when ``{raw}/{sid}/{source}`` exists and contains a NIfTI."""
-    folder = raw_dir / subject_id / source
-    nested = raw_dir / subject_id / "T1w" / source
+def nerve_masks_root(config: Mapping) -> Path:
+    """Directory where Phase-2 holdout mask folders live.
+
+    Prefer ``data.nerve_masks.root`` (e.g. ``data/raw``); fall back to
+    ``data.paths.raw`` when unset.
+    """
+    rel = config.get("data", {}).get("nerve_masks", {}).get("root")
+    if rel:
+        path = Path(str(rel))
+        return path if path.is_absolute() else get_project_root() / path
+    return resolve_path(config, "data.paths.raw")
+
+
+def subject_has_nerve_masks(masks_dir: Path, subject_id: str, source: str) -> bool:
+    """True when ``{masks_dir}/{sid}/{source}`` exists and contains a NIfTI."""
+    folder = masks_dir / subject_id / source
+    nested = masks_dir / subject_id / "T1w" / source
     if nested.is_dir():
         folder = nested
     if not folder.is_dir():
@@ -35,15 +48,20 @@ def subject_has_nerve_masks(raw_dir: Path, subject_id: str, source: str) -> bool
 
 
 def build_subject_split(config: Mapping) -> dict[str, list[str]]:
-    """Partition raw subjects into ``pretrain`` vs ``nerve`` by mask folder presence."""
-    raw_dir = resolve_path(config, "data.paths.raw")
+    """Partition volume subjects into ``pretrain`` vs ``nerve`` by mask presence.
+
+    Subjects are listed from ``data.paths.raw`` (HCP volumes). Holdouts are
+    those with a NIfTI under ``data.nerve_masks.root`` / ``source`` (typically
+    ``data/raw`` / ``tract_masks_1.25``).
+    """
+    masks_dir = nerve_masks_root(config)
     source = str(
-        config.get("data", {}).get("nerve_masks", {}).get("source", "nerve_masks_1.25")
+        config.get("data", {}).get("nerve_masks", {}).get("source", "tract_masks_1.25")
     )
     pretrain: list[str] = []
     nerve: list[str] = []
     for sid in list_raw_subject_ids(config):
-        if subject_has_nerve_masks(raw_dir, sid, source):
+        if subject_has_nerve_masks(masks_dir, sid, source):
             nerve.append(sid)
         else:
             pretrain.append(sid)

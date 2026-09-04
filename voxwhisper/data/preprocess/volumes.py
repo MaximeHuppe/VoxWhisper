@@ -46,15 +46,15 @@ def _write_volume(volume, affine, output_dir, subject_id: str, modality: str) ->
     ensure_dir(subject_processed_dir(output_dir, subject_id))
     out_file = volume_path(output_dir, subject_id, modality)
     save_nifti(volume, out_file, affine=affine, dtype=np.float32)
-    print(
-        f"  Saved {modality}: {out_file} "
-        f"shape={volume.shape} range=[{volume.min():.3f}, {volume.max():.3f}]"
-    )
+    # print(
+    #     f"  Saved {modality}: {out_file} "
+    #     f"shape={volume.shape} range=[{volume.min():.3f}, {volume.max():.3f}]"
+    # )
 
 
 def process_subject(subject_id: str, raw_dir: str, output_dir, config: dict) -> None:
     """Process T1, and FA when the stage config includes it."""
-    print(f"Processing Subject: {subject_id}")
+    # print(f"Processing Subject: {subject_id}")
 
     volumes_cfg = config["data"]["volumes"]
     prep_cfg = config["preprocessing"]

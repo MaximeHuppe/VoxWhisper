@@ -185,7 +185,7 @@ def _print_run_header(config, run_path, device, seed, train_loader, val_loader, 
     print(f"  {stage_id(config):<10}  ·  {train_cfg.get('run_name', '?')}")
     print(sep)
     print(f"  Run        {run_path}")
-    print(f"  Device     {device:<20}  Seed  {seed}")
+    print(f"  Device     {str(device):<20}  Seed  {seed}")
     warmup = train_cfg.get("warmup_epochs", 0)
     print(
         f"  Epochs     {train_cfg['epochs']:<8}  LR  {train_cfg['learning_rate']:.2e}"

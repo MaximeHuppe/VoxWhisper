@@ -15,6 +15,7 @@ from pathlib import Path
 import nibabel as nib
 import numpy as np
 from nibabel.processing import resample_from_to
+from tqdm import tqdm
 
 from voxwhisper.util.config import PRIMARY_MODALITY, ensure_dir, load_structures, resolve_path
 from voxwhisper.data.nifti_io import (
@@ -48,7 +49,7 @@ def _named_mask_dir(raw_dir: str, subject_id: str, source: str) -> Path:
 
 def process_dense_mask(subject_id: str, raw_dir: str, output_dir, config: dict) -> None:
     """Resample wmparc onto T1, collapse to dense ids, apply brainmask."""
-    print(f"Processing dense labels: {subject_id}")
+    # print(f"Processing dense labels: {subject_id}")
 
     t1_cfg = config["data"]["volumes"][PRIMARY_MODALITY]
     t1_path = resolve_raw_volume_path(raw_dir, subject_id, t1_cfg["filename"])
@@ -84,7 +85,7 @@ def process_named_masks(
     structures: dict,
 ) -> None:
     """Stack per-structure NIfTIs (nerves / named masks) onto the T1 grid."""
-    print(f"Processing named masks: {subject_id}")
+    # print(f"Processing named masks: {subject_id}")
 
     t1_cfg = config["data"]["volumes"][PRIMARY_MODALITY]
     t1_path = resolve_raw_volume_path(raw_dir, subject_id, t1_cfg["filename"])
@@ -124,10 +125,10 @@ def _save_label_map(label_data, t1_img, output_dir, subject_id: str) -> None:
     out_file = mask_path(output_dir, subject_id)
     save_nifti(label_data, out_file, affine=t1_img.affine, dtype=np.uint8)
     uniq, counts = np.unique(label_data, return_counts=True)
-    print(
-        f"  Saved: {out_file} shape={label_data.shape} "
-        f"labels={dict(zip(uniq.astype(int).tolist(), counts.tolist()))}"
-    )
+    # print(
+    #     f"  Saved: {out_file} shape={label_data.shape} "
+    #     f"labels={dict(zip(uniq.astype(int).tolist(), counts.tolist()))}"
+    # )
 
 
 def process_mask(subject_id: str, raw_dir: str, output_dir, config: dict) -> None:
@@ -164,7 +165,17 @@ def preprocess_masks(config: dict, subject_ids=None) -> None:
         allowed = set(subject_ids)
         subjects = [s for s in subjects if s in allowed]
 
+    t1_filename = config["data"]["volumes"][PRIMARY_MODALITY]["filename"]
+    with_t1 = [
+        s for s in subjects
+        if resolve_raw_volume_path(raw_dir, s, t1_filename) is not None
+    ]
+    skipped = len(subjects) - len(with_t1)
+    if skipped:
+        print(f"Skipping {skipped} subject(s) with no T1 — masks not computed")
+    subjects = with_t1
+
     label = "named nerve masks" if kind == "named" else "dense wmparc masks"
     print(f"Processing {label} for {len(subjects)} subjects (NN onto T1)")
-    for subject_id in subjects:
+    for subject_id in tqdm(subjects, desc="Processing masks"):
         process_mask(subject_id, str(raw_dir), output_dir, config)
