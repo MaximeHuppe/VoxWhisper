@@ -58,7 +58,7 @@ Order of channels follows ascending `label`. wmparc gyral parcels and skull/bone
 | `positive_ratio` | Probability of sampling a crop centered on a positive voxel |
 | `train_patches_per_subject` | Independent random crops per subject per training epoch |
 | `val_patches_per_subject` | Frozen crops per subject in val/test |
-| `prompts_per_crop` | Foreground name prompts sampled per **train** crop (val uses all) |
+| `prompts_per_crop` | Foreground name prompts sampled per **train** crop. Background (label 0) is **always** prepended as channel 0 so Dice/BCE stay aligned with full-prompt validation. `0` disables sampling and uses every prompt. Val always uses all prompts. |
 | `positive_labels` | Injected from structures |
 
 ### `preprocessing`
@@ -100,6 +100,8 @@ Bottleneck spatial size is `patch.size` divided by the product of `strides`. Cha
 | `batch_size` | Patches per step |
 | `epochs` | Cosine schedule `T_max` |
 | `learning_rate` | AdamW LR |
+| `bce_weight` | Multiplier on the BCE term |
+| `exclude_background` | Soft Dice skips channel 0 when true (default). Dataset sampling always puts background first. |
 | `deep_supervision_weights` | Weight per decoder stage (coarse → fine) |
 | `checkpoint.monitor` | `loss` or `dice` |
 | `checkpoint.keep` | Keep top-k checkpoints |

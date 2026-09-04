@@ -31,10 +31,15 @@ data:
 
   patch:
     size:                      [128, 128, 128]
-    positive_ratio:            0.5
-    train_patches_per_subject: 2
+    # Bias crops toward tissue; with 32 classes "any FG voxel" is almost
+    # whole-brain, so keep this moderately high for small structures.
+    positive_ratio:            0.7
+    # Dense Phase 1 needs more spatial coverage than the old 6-tract recipe.
+    train_patches_per_subject: 8
     val_patches_per_subject:   4
-    prompts_per_crop:          4
+    # Foreground names sampled per train crop; background is always prepended
+    # as channel 0 (→ 1 + prompts_per_crop channels). Use 0 for all prompts.
+    prompts_per_crop:          8
 
 # ── Pre-processing ────────────────────────────────────────────────────────────
 
@@ -73,9 +78,12 @@ training:
   batch_size:      2
   epochs:         150
   learning_rate:  0.0001
-  warmup_epochs:   10
+  # Shorter warm-up so peak LR is reached while patches still vary a lot.
+  warmup_epochs:    5
 
   bce_weight:     0.5
+  # Channel 0 must be background (enforced by the dataset sampler).
+  exclude_background: true
   deep_supervision_weights: [0.1, 0.3, 0.6]
 
   checkpoint:

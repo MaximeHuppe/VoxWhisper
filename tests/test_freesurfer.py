@@ -55,6 +55,15 @@ def test_sample_prompt_labels_prefers_present():
     assert 7 in chosen_k
 
 
+def test_sample_prompt_labels_never_returns_background():
+    labels = np.zeros((4, 4, 4), dtype=np.int16)
+    labels[1:3, 1:3, 1:3] = 2
+    rng = np.random.default_rng(1)
+    chosen = sample_prompt_labels(labels, positive_labels=[0, 1, 2], k=2, rng=rng)
+    assert 0 not in chosen
+    assert set(chosen).issubset({1, 2})
+
+
 def test_process_named_masks_stacks_on_t1(tmp_whisper_config, tmp_path):
     import nibabel as nib
     from voxwhisper.data.nifti_io import mask_path
