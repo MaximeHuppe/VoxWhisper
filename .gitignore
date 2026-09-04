@@ -14,7 +14,7 @@ wandb/
 cache/*/*.pt
 cache/*.npy
 cache/*.npz
-runs/
+runs/*/
 
 # ==========================================
 # Python Environment & Caches

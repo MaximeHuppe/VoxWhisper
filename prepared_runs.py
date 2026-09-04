@@ -5,7 +5,7 @@ Experiment design
 -----------------
 Runs are organised in two groups:
 
-GROUP 1 — Baseline → Champion incremental build-up chain  (all 7 re-run for W&B/TB logs)
+GROUP 1 — Baseline → Champion incremental build-up chain  (all 6 re-run for W&B/TB logs)
   Each step adds *exactly one* hyperparameter change on top of the previous step.
   The per-step Δ in Test Mean Dice isolates each parameter's marginal
   contribution to the historical 0.557 → 0.8167 improvement.
@@ -13,12 +13,11 @@ GROUP 1 — Baseline → Champion incremental build-up chain  (all 7 re-run for 
   Step  │ Added parameter              │ Run name
   ──────┼──────────────────────────────┼──────────────────────────
     0   │ (baseline)                   │ baseline
-    1   │ LR 5e-5 → 1e-4              │ lr1e-4
+    1   │ LR 5e-5 → 1e-4              │ chain01_lr1e-4
     2   │ bce_pos_weight 20 → 1        │ chain02_bce_pos_w1
-    3   │ eff_batch 2 → 8              │ chain03_eff_batch8
-    4   │ warmup 0 → 10 ep             │ chain04_warmup10
-    5   │ bce_weight 1.0 → 0.5         │ chain05_bce_weight05
-    6   │ large model + patches 4 → 2  │ large_lr1e-4_patches2  (champion)
+    3   │ warmup 0 → 10 ep             │ chain03_warmup10
+    4   │ bce_weight 1.0 → 0.5         │ chain04_bce_weight05
+    5   │ large model                  │ chain05_large  (champion)
 
 GROUP 2 — Orthogonal follow-up ablations from champion  (all new)
   Each run is a one-field diff from the champion config, exploring directions
@@ -37,10 +36,10 @@ Each run: 1) writes a config YAML
           4) updates runs/EXPERIMENT_LOGS.md automatically
 
 Usage:
-    python prepared_runs.py                          # run all 10 experiments
+    python prepared_runs.py                          # run all 9 experiments
     python prepared_runs.py --dry-run                # write configs only
     python prepared_runs.py --only chain02_bce_pos_w1       # run one experiment
-    python prepared_runs.py --only chain02_bce_pos_w1,chain03_eff_batch8
+    python prepared_runs.py --only chain02_bce_pos_w1,chain03_warmup10
 """
 from __future__ import annotations
 
@@ -122,7 +121,7 @@ CHAIN_00_BASELINE = step(BASELINE, "baseline")
 # flat loss regions early; AdamW with weight-decay already limits divergence.
 # Test Mean Dice (Ch) ≈ 0.6748 (+0.120 vs step 0).
 CHAIN_01_LR = step(
-    CHAIN_00_BASELINE, "lr1e-4",
+    CHAIN_00_BASELINE, "chain01_lr1e-4",
     learning_rate=1e-4,
     tags=["chain", "step-1"],
 )
@@ -143,57 +142,41 @@ CHAIN_02_BCE_POSW = step(
 )
 
 # ── Step 3  NEW RUN ──────────────────────────────────────────────────────────
-# Adds: effective_batch_size 2 → 8  (grad accumulation over 4 micro-batches).
-# Hypothesis: a larger effective batch reduces gradient variance in the
-# cross-attention layers, smoothing the loss landscape.  This step is placed
-# BEFORE warmup because warmup is most effective when the early gradient steps
-# are already larger and fewer — its stabilisation benefit is amplified by
-# the higher effective batch.
-CHAIN_03_EFF_BATCH = step(
-    CHAIN_02_BCE_POSW, "chain03_eff_batch8",
-    effective_batch_size=8,
+# Adds: warmup_epochs 0 → 10.
+# Hypothesis: linear LR warmup prevents large gradient spikes in the first
+# optimizer steps — the attention layers' initial random Q/K/V weights can
+# produce extreme updates at the higher LR from step 1.
+CHAIN_03_WARMUP = step(
+    CHAIN_02_BCE_POSW, "chain03_warmup10",
+    warmup_epochs=10,
     tags=["chain", "step-3"],
 )
 
 # ── Step 4  NEW RUN ──────────────────────────────────────────────────────────
-# Adds: warmup_epochs 0 → 10.
-# Hypothesis: linear LR warmup prevents large gradient spikes in the first
-# optimizer steps — especially important at eff_batch=8 where each step is
-# a 4-sample gradient and the attention layers' initial random Q/K/V weights
-# can produce extreme updates.  Warmup logically follows eff_batch.
-CHAIN_04_WARMUP = step(
-    CHAIN_03_EFF_BATCH, "chain04_warmup10",
-    warmup_epochs=10,
-    tags=["chain", "step-4"],
-)
-
-# ── Step 5  NEW RUN ──────────────────────────────────────────────────────────
 # Adds: bce_weight 1.0 → 0.5.
 # Hypothesis: down-weighting BCE relative to Dice in the combined loss shifts
 # the gradient signal toward the overlap metric we actually optimise at eval.
-# Placed last in the recipe phase — with LR, pos_weight, eff_batch and warmup
-# all already tuned — so it is a *refinement* rather than a fundamental fix.
-# Expected to show the smallest Δ of the five recipe steps.
-CHAIN_05_BCE_WEIGHT = step(
-    CHAIN_04_WARMUP, "chain05_bce_weight05",
+# Placed last in the recipe phase — with LR, pos_weight and warmup already
+# tuned — so it is a *refinement* rather than a fundamental fix.
+# Expected to show the smallest Δ of the recipe steps.
+CHAIN_04_BCE_WEIGHT = step(
+    CHAIN_03_WARMUP, "chain04_bce_weight05",
     bce_weight=0.5,
-    tags=["chain", "step-5"],
+    tags=["chain", "step-4"],
 )
 
-# ── Step 6 ──────────────────────────────────────────────────────────────────
-# Adds: encoder [16,32,64,128] → [32,64,128,256], embed_dim 128 → 256,
-#        train_patches_per_subject 4 → 2 (historically bundled with the wider
-#        model to offset GPU memory usage — same grouping used in Run 02/03).
+# ── Step 5 ──────────────────────────────────────────────────────────────────
+# Adds: encoder [16,32,64,128] → [32,64,128,256], embed_dim 128 → 256.
 # Scale-up is the LAST step: once the recipe is fully optimised (LR, loss,
-# batch, schedule), increasing capacity is expected to produce the maximum
-# return without risk of over-fitting to an unstable training loop.
+# schedule), increasing capacity is expected to produce the maximum return
+# without risk of over-fitting to an unstable training loop.
 # This is the current champion.  Test Mean Dice (Ch) = 0.8167.
+# (train_patches_per_subject stays at the shared baseline value of 2.)
 CHAMPION = step(
-    CHAIN_05_BCE_WEIGHT, "large_lr1e-4_patches2",
+    CHAIN_04_BCE_WEIGHT, "chain05_large",
     embed_dim=256,
     encoder_channels=[32, 64, 128, 256],
-    train_patches_per_subject=2,
-    tags=["chain", "step-6", "champion"],
+    tags=["chain", "step-5", "champion"],
 )
 
 # ===========================================================================
@@ -203,9 +186,9 @@ CHAMPION = step(
 # ── ABL-modality_t1t2 ────────────────────────────────────────────────────────
 # Swaps secondary modality FA → T2 at full champion-recipe quality.
 # The earlier T1+T2 run (processed_T1_T2_07/baseline) used the bad baseline
-# recipe (lr=5e-5, bce_pos_weight=20, eff_batch=2), so FA appeared +0.055
-# better — but that comparison was fully confounded.  This run cleanly
-# isolates modality choice under the good recipe.
+# recipe (lr=5e-5, bce_pos_weight=20), so FA appeared +0.055 better — but that
+# comparison was fully confounded.  This run cleanly isolates modality choice
+# under the good recipe.
 ABL_MODALITY = ablation(
     CHAMPION, "ABL-modality_t1t2",
     processed="data/processed_T1_T2_07",
@@ -214,8 +197,7 @@ ABL_MODALITY = ablation(
 )
 
 # ── ABL-patches4 ─────────────────────────────────────────────────────────────
-# Restores train_patches_per_subject to 4 (champion uses 2, historically
-# reduced to offset the large model's GPU memory usage).
+# Raises train_patches_per_subject 2 → 4 (shared default across the chain is 2).
 # Hypothesis: more crop diversity per epoch improves segmentation of short /
 # curved tracts (UF); expected cost is approximately 2× wall-clock per epoch.
 ABL_PATCHES4 = ablation(
@@ -226,8 +208,8 @@ ABL_PATCHES4 = ablation(
 
 # ── ABL-patch160 ─────────────────────────────────────────────────────────────
 # Larger 160³ patch gives the model more spatial context per crop.  Physical
-# batch drops to 1 to stay within GPU memory; effective batch remains 8 via
-# 8 accumulation steps.
+# batch drops to 1 to stay within GPU memory (effective batch stays at the
+# champion value via gradient accumulation).
 # Hypothesis: long tracts (ATR) benefit most from the wider field of view;
 # total training signal per epoch is similar since more context per sample
 # partially compensates for fewer samples per step.
@@ -235,7 +217,6 @@ ABL_PATCH160 = ablation(
     CHAMPION, "ABL-patch160",
     patch_size=[160, 160, 160],
     batch_size=1,
-    # eff_batch stays 8, accum becomes 8 steps instead of 4
     tags=["ablation", "abl-patch-size"],
 )
 
@@ -251,10 +232,9 @@ RUNS: list[dict] = [
     CHAIN_00_BASELINE,      # step 0: baseline                (anchor)
     CHAIN_01_LR,            # step 1: + lr 1e-4               (largest single gain)
     CHAIN_02_BCE_POSW,      # step 2: + bce_pos_weight 1      (fix pathological loss)
-    CHAIN_03_EFF_BATCH,     # step 3: + eff_batch 8           (gradient stability)
-    CHAIN_04_WARMUP,        # step 4: + warmup 10             (LR schedule stabilisation)
-    CHAIN_05_BCE_WEIGHT,    # step 5: + bce_weight 0.5        (loss balance refinement)
-    CHAMPION,               # step 6: + large model + patches 2  (scale-up)
+    CHAIN_03_WARMUP,        # step 3: + warmup 10             (LR schedule stabilisation)
+    CHAIN_04_BCE_WEIGHT,    # step 4: + bce_weight 0.5        (loss balance refinement)
+    CHAMPION,               # step 5: + large model           (scale-up)
     # ── Group 2: orthogonal follow-ups from champion ───────────────────────
     ABL_MODALITY,           # T1+T2 modality under good recipe
     ABL_PATCHES4,           # more train patches / subject
