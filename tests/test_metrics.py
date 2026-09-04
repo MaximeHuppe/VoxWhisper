@@ -53,8 +53,34 @@ def test_soft_dice_pools_per_channel_across_batch():
 def test_dice_bce_from_config():
     loss = DiceBCELoss.from_config({"training": {"bce_weight": 0.5}})
     assert loss.bce_weight == pytest.approx(0.5)
+    assert loss.exclude_background is True
     default = DiceBCELoss.from_config({})
     assert default.bce_weight == pytest.approx(1.0)
+    assert default.exclude_background is True
+    included = DiceBCELoss.from_config({"training": {"exclude_background": False}})
+    assert included.exclude_background is False
+
+
+def test_dice_bce_exclude_background_skips_channel_zero():
+    """Channel 0 must not dominate Dice when it is background."""
+    logits = torch.full((1, 3, 1, 1, 4), -10.0)
+    target = torch.zeros(1, 3, 1, 1, 4)
+    # Background channel: perfect match — would make Dice look good if included.
+    logits[:, 0] = 10.0
+    target[:, 0] = 1.0
+    # Foreground channel 1: total miss.
+    target[:, 1] = 1.0
+    logits[:, 1] = -10.0
+    # Foreground channel 2: perfect.
+    target[:, 2] = 1.0
+    logits[:, 2] = 10.0
+
+    excluded = DiceBCELoss(eps=1e-5, bce_weight=0.0, exclude_background=True)
+    included = DiceBCELoss(eps=1e-5, bce_weight=0.0, exclude_background=False)
+
+    # Mean of (miss≈1, hit≈0) → ~0.5; including perfect BG would pull lower.
+    assert excluded(logits, target).item() == pytest.approx(0.5, abs=1e-3)
+    assert included(logits, target).item() < excluded(logits, target).item()
 
 
 def test_named_foreground_dice_drops_background():

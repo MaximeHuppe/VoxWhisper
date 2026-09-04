@@ -35,8 +35,13 @@ def sample_prompt_labels(
     k: int,
     rng: np.random.Generator,
 ) -> List[int]:
-    """Pick ``k`` foreground labels, preferring those present in ``labels``."""
-    pos = [int(x) for x in positive_labels]
+    """Pick ``k`` foreground labels, preferring those present in ``labels``.
+
+    Never returns background (label 0). Callers that need the Dice/BCE
+    background channel must prepend ``0`` themselves — see
+    ``VoxDenseDataset._channels_for_patch``.
+    """
+    pos = [int(x) for x in positive_labels if int(x) != 0]
     if not pos:
         return []
     k = max(1, min(int(k), len(pos)))
@@ -243,15 +248,25 @@ class VoxDenseDataset(Dataset):
     def _channels_for_patch(
         self, label_patch: np.ndarray
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Return ``(text_embeddings, gt_mask)`` for this crop."""
+        """Return ``(text_embeddings, gt_mask)`` for this crop.
+
+        Channel 0 is **always** background (label / embedding index 0) so
+        ``DiceBCELoss`` and the patch Dice metrics can safely skip it.
+        When ``prompts_per_crop > 0`` in training, that many *foreground*
+        names are sampled and stacked after background
+        (``1 + prompts_per_crop`` channels total). Validation / full-prompt
+        mode uses every cached prompt in label order.
+        """
         if self.training and self.prompts_per_crop > 0:
-            ids = sample_prompt_labels(
+            fg_ids = sample_prompt_labels(
                 label_patch, self.positive_labels, self.prompts_per_crop, self._get_rng()
             )
+            # Background first — matches full-prompt layout and the loss contract.
+            ids = [0] + [int(lab) for lab in fg_ids if int(lab) != 0]
         else:
             ids = list(range(self.n_prompts))
         if not ids:
-            ids = list(range(min(1, self.n_prompts)))
+            ids = [0] if self.n_prompts > 0 else []
         gt = np.stack(
             [(label_patch == int(lab)).astype(np.float32) for lab in ids],
             axis=0,

@@ -73,6 +73,7 @@ def dense_cfg(tmp_config):
 def test_dataset_item_shapes_and_dtypes(dense_cfg):
     patch_size = tuple(dense_cfg["data"]["patch"]["size"])
     k = int(dense_cfg["data"]["patch"]["prompts_per_crop"])
+    n_ch = k + 1  # background + k foreground
     text_dim = dense_cfg["model"]["text_dim"]
 
     dataset = VoxDenseDataset(dense_cfg, training=True)
@@ -82,8 +83,22 @@ def test_dataset_item_shapes_and_dtypes(dense_cfg):
     assert gt_mask.dtype == torch.float32
     assert text_emb.dtype == torch.float32
     assert volume.shape == (1, *patch_size)
-    assert gt_mask.shape == (k, *patch_size)
-    assert text_emb.shape == (k, text_dim)
+    assert gt_mask.shape == (n_ch, *patch_size)
+    assert text_emb.shape == (n_ch, text_dim)
+
+
+def test_train_prompt_sample_keeps_background_first(dense_cfg):
+    """DiceBCELoss skips channel 0 — training batches must put background there."""
+    k = int(dense_cfg["data"]["patch"]["prompts_per_crop"])
+    dataset = VoxDenseDataset(dense_cfg, training=True)
+    _, text_emb, gt_mask = dataset[0]
+
+    assert text_emb.shape[0] == k + 1
+    assert gt_mask.shape[0] == k + 1
+    torch.testing.assert_close(text_emb[0], dataset.text_embeddings[0])
+    # Remaining channels are foreground embeddings (not background).
+    for i in range(1, text_emb.shape[0]):
+        assert not torch.allclose(text_emb[i], dataset.text_embeddings[0])
 
 
 def test_val_uses_all_prompts(dense_cfg):
@@ -93,12 +108,14 @@ def test_val_uses_all_prompts(dense_cfg):
     patch_size = tuple(dense_cfg["data"]["patch"]["size"])
     assert text_emb.shape[0] == n_prompts
     assert gt_mask.shape == (n_prompts, *patch_size)
+    torch.testing.assert_close(text_emb[0], dataset.text_embeddings[0])
 
 
 def test_dataloader_batch_shapes(dense_cfg):
     patch_size = tuple(dense_cfg["data"]["patch"]["size"])
     batch_size = dense_cfg["training"]["batch_size"]
     k = int(dense_cfg["data"]["patch"]["prompts_per_crop"])
+    n_ch = k + 1
     text_dim = dense_cfg["model"]["text_dim"]
 
     dataset = VoxDenseDataset(dense_cfg, training=True)
@@ -106,8 +123,8 @@ def test_dataloader_batch_shapes(dense_cfg):
     volume, text_emb, gt_mask = next(iter(loader))
 
     assert volume.shape == (batch_size, 1, *patch_size)
-    assert text_emb.shape == (batch_size, k, text_dim)
-    assert gt_mask.shape == (batch_size, k, *patch_size)
+    assert text_emb.shape == (batch_size, n_ch, text_dim)
+    assert gt_mask.shape == (batch_size, n_ch, *patch_size)
 
 
 def test_model_forward_accepts_dataloader_batch(dense_cfg):

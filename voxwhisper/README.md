@@ -60,8 +60,8 @@ Shared prompt tensor at `cache/prompts_dense.pt` with shape `[N_T, text_dim]`.
 
 | Mode | Behavior |
 |------|----------|
-| `training=True` | `train_patches_per_subject` crops; sample `prompts_per_crop` foreground names |
-| `training=False` | frozen centers; **all** name prompts |
+| `training=True` | `train_patches_per_subject` crops; sample `prompts_per_crop` foreground names **after** background (channel 0) |
+| `training=False` | frozen centers; **all** name prompts (background first) |
 
 `VoxWhisperDataset` (T1+FA) remains for Phase 2.
 

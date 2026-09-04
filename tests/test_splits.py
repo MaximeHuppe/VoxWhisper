@@ -17,10 +17,13 @@ def _touch_nii(path: Path) -> None:
 
 def test_build_subject_split_holds_out_nerve_masks(tmp_config, tmp_path):
     raw = Path(tmp_config["data"]["paths"]["raw"])
+    nerve_root = Path(tmp_config["data"]["nerve_masks"]["root"])
+    source = tmp_config["data"]["nerve_masks"]["source"]
     (raw / "pre_a").mkdir(parents=True)
     (raw / "pre_b").mkdir(parents=True)
     (raw / "nerve_a").mkdir(parents=True)
-    _touch_nii(raw / "nerve_a" / "nerve_masks_1.25" / "left.nii.gz")
+    # Masks live under nerve_masks.root (data/raw), not the HCP volume tree.
+    _touch_nii(nerve_root / "nerve_a" / source / "left.nii.gz")
 
     split = build_subject_split(tmp_config)
     assert split["pretrain"] == ["pre_a", "pre_b"]

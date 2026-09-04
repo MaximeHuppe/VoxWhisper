@@ -4,7 +4,12 @@ Design notes
 ------------
 ``DiceBCELoss`` combines:
 * **BCE** — ``binary_cross_entropy_with_logits`` over *all* channels.
-* **Dice** — mean soft Dice over *foreground channels only* (indices 1…N_T−1).
+* **Dice** — mean soft Dice over *foreground channels only* (indices 1…N_T−1),
+  when ``exclude_background=True`` (default).
+
+**Contract:** channel 0 must be the background class.  ``VoxDenseDataset``
+always prepends background when sampling ``prompts_per_crop`` so training
+batches obey the same layout as full-prompt validation.
 
 The total loss is ``Dice + bce_weight × BCE``.  Applied at every decoder scale
 via ``deep_supervision_loss`` with configurable per-scale weights
@@ -34,18 +39,29 @@ class DiceBCELoss(nn.Module):
         Multiplier on the BCE term.  Combined loss = Dice + bce_weight × BCE.
     eps : float
         Smoothing constant for the Dice denominator.
+    exclude_background : bool
+        If True (default), soft Dice ignores channel 0.  Callers must ensure
+        channel 0 is background — never a sampled foreground structure.
     """
 
-    def __init__(self, eps: float = 1e-5, bce_weight: float = 1.0) -> None:
+    def __init__(
+        self,
+        eps: float = 1e-5,
+        bce_weight: float = 1.0,
+        exclude_background: bool = True,
+    ) -> None:
         super().__init__()
         self.eps = eps
         self.bce_weight = bce_weight
+        self.exclude_background = exclude_background
 
     @classmethod
     def from_config(cls, config: dict) -> "DiceBCELoss":
         """Construct from ``training.bce_weight`` in the loaded YAML config."""
-        bce_weight = float(config.get("training", {}).get("bce_weight", 1.0))
-        return cls(bce_weight=bce_weight)
+        train_cfg = config.get("training", {})
+        bce_weight = float(train_cfg.get("bce_weight", 1.0))
+        exclude_background = bool(train_cfg.get("exclude_background", True))
+        return cls(bce_weight=bce_weight, exclude_background=exclude_background)
 
     def forward(self, pred_logits: torch.Tensor, target_mask: torch.Tensor) -> torch.Tensor:
         """
@@ -54,13 +70,19 @@ class DiceBCELoss(nn.Module):
         pred_logits : [B, N_T, D, H, W]  — raw (un-sigmoided) logits
         target_mask : [B, N_T, D, H, W]  — binary targets in {0, 1}
         """
+        if pred_logits.shape != target_mask.shape:
+            raise ValueError(
+                f"pred/target shape mismatch: {tuple(pred_logits.shape)} vs "
+                f"{tuple(target_mask.shape)}"
+            )
         n_channels = pred_logits.shape[1]
+        if n_channels < 1:
+            raise ValueError("expected at least one prompt channel")
+
         bce_loss = F.binary_cross_entropy_with_logits(pred_logits, target_mask)
-
         pred_probs = torch.sigmoid(pred_logits)
-        n_foreground = n_channels - 1
 
-        if n_foreground > 0:
+        if self.exclude_background and n_channels > 1:
             fg_pred = _channel_flat(pred_probs[:, 1:])
             fg_tgt = _channel_flat(target_mask[:, 1:])
             intersection = (fg_pred * fg_tgt).sum(dim=1)
@@ -68,11 +90,13 @@ class DiceBCELoss(nn.Module):
             channel_dice = (2.0 * intersection + self.eps) / (union + self.eps)
             dice_loss = (1.0 - channel_dice).mean()
         else:
-            pred_flat = pred_probs.reshape(-1)
-            tgt_flat = target_mask.reshape(-1)
-            intersection = (pred_flat * tgt_flat).sum()
-            union = pred_flat.sum() + tgt_flat.sum()
-            dice_loss = 1.0 - (2.0 * intersection + self.eps) / (union + self.eps)
+            # Single-channel or explicit "Dice over every channel".
+            pred_flat = _channel_flat(pred_probs)
+            tgt_flat = _channel_flat(target_mask)
+            intersection = (pred_flat * tgt_flat).sum(dim=1)
+            union = pred_flat.sum(dim=1) + tgt_flat.sum(dim=1)
+            channel_dice = (2.0 * intersection + self.eps) / (union + self.eps)
+            dice_loss = (1.0 - channel_dice).mean()
 
         return dice_loss + self.bce_weight * bce_loss
 

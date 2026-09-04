@@ -43,6 +43,7 @@ The checkpoint stores `encoder_state_dict` so Phase 2 can reload the T1 encoder 
 | `training.epochs` | Total training epochs |
 | `training.batch_size` | Physical batch size |
 | `training.bce_weight` | BCE term multiplier (`loss = Dice + bce_weight × BCE`) |
+| `training.exclude_background` | Soft Dice skips channel 0 (must be background; default true) |
 | `training.deep_supervision_weights` | Per-scale weights `[coarse, mid, fine]` |
 | `training.seed` | Global RNG seed |
 | `training.checkpoint.monitor` | `dice` (default) or `loss` |
@@ -52,7 +53,7 @@ The checkpoint stores `encoder_state_dict` so Phase 2 can reload the T1 encoder 
 | `model.num_heads` | Attention heads in PromptDecoder |
 | `data.patch.size` | Training patch size (D × H × W voxels) |
 | `data.patch.train_patches_per_subject` | Crops sampled per subject per epoch |
-| `data.patch.prompts_per_crop` | Name prompts sampled per train crop |
+| `data.patch.prompts_per_crop` | Foreground name prompts per **train** crop (background always prepended as channel 0; `0` = all prompts) |
 | `data.patch.positive_ratio` | Fraction of crops centred on a foreground voxel |
 | `splits.*` | Train/val/test ratios; `subject_split` holds pretrain vs nerve holdout |
 | `logging.wandb.*` | W&B project, entity, tags |
