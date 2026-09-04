@@ -3,7 +3,7 @@
 Usage (from the project root):
 
     python scripts/inspect_embeddings.py
-    python scripts/inspect_embeddings.py --cache cache/prompts_tracts.pt
+    python scripts/inspect_embeddings.py --cache cache/prompts_dense.pt
 """
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ import os
 
 import torch
 
-from voxwhisper.config import load_config
+from voxwhisper.util.config import load_config
 
 
 def inspect_prompt_embeddings(cache_path: str) -> None:
@@ -62,7 +62,7 @@ def main(argv=None) -> None:
     parser = argparse.ArgumentParser(description="Inspect cached prompt embeddings")
     parser.add_argument(
         "--cache",
-        default="cache/prompts_tracts.pt",
+        default="cache/prompts_dense.pt",
         help="Path to the .pt embedding file",
     )
     args = parser.parse_args(argv)

@@ -13,7 +13,7 @@ import pytest
 
 @pytest.fixture(scope="session")
 def base_config() -> dict:
-    """Minimal in-memory config matching the ``best_config.yaml`` schema.
+    """Minimal in-memory config matching the ``voxdense.yaml`` schema.
 
     Uses tiny spatial dimensions so tests run in seconds on CPU.
     Paths are empty strings; override them per-test via ``tmp_config``.
@@ -28,32 +28,36 @@ def base_config() -> dict:
             },
             "volumes": {
                 "t1": {"filename": "T1w.nii.gz"},
-                "fa": {"filename": "dti_FA.nii.gz"},
+                "brainmask": {"filename": "brainmask_fs.nii.gz"},
+                "wmparc": {"filename": "wmparc.nii.gz"},
             },
             "masks": {
-                "source": "tract_masks_1.25",
-                "structures": "config/structures.json",
+                "structures": "config/structures_dense.json",
             },
-            "prompts": ["background", "AF_L", "AF_R", "CST_L"],
-            "structure_names": ["background", "AF_L", "AF_R", "CST_L"],
+            "nerve_masks": {"source": "nerve_masks_1.25"},
+            "prompts": ["background", "left_thalamus", "right_thalamus", "brainstem"],
+            "structure_names": ["background", "left_thalamus", "right_thalamus", "brainstem"],
             "patch": {
                 "size": [16, 16, 16],
                 "positive_ratio": 0.5,
                 "train_patches_per_subject": 1,
                 "val_patches_per_subject": 2,
                 "positive_labels": [1, 2, 3],
+                "prompts_per_crop": 2,
             },
         },
         "preprocessing": {
             "zscore_nonzero_only": True,
+            "apply_brainmask": True,
         },
         "text_encoder": {
             "model_name": "microsoft/BiomedNLP-PubMedBERT-base-uncased-abstract-fulltext",
-            "cache_file": "prompts_tracts.pt",
+            "cache_file": "prompts_dense.pt",
         },
         "model": {
+            "name": "VoxDense",
             "input_channels": 1,
-            "text_dim": 768,
+            "text_dim": 8,
             "embed_dim": 16,
             "num_heads": 2,
             "encoder": {
@@ -70,6 +74,7 @@ def base_config() -> dict:
             "test_ratio": 0.2,
             "seed": 42,
             "manifest": "data/splits.json",
+            "subject_split": "config/subject_split.json",
         },
         "training": {
             "run_name": "test",
@@ -112,4 +117,19 @@ def tmp_config(tmp_path: Path, base_config: dict) -> dict:
     cfg["data"]["paths"]["runs"] = str(tmp_path / "runs")
     cfg["data"]["paths"]["cache"] = str(tmp_path / "cache")
     cfg["splits"]["manifest"] = str(tmp_path / "splits.json")
+    cfg["splits"]["subject_split"] = str(tmp_path / "subject_split.json")
+    return cfg
+
+
+@pytest.fixture()
+def tmp_whisper_config(tmp_config: dict) -> dict:
+    """Phase 2 (T1+FA nerve) config sharing the same temp paths as ``tmp_config``."""
+    cfg = copy.deepcopy(tmp_config)
+    cfg["model"]["name"] = "VoxWhisper"
+    cfg["data"]["volumes"]["fa"] = {"filename": "dti_FA.nii.gz"}
+    cfg["data"]["masks"]["source"] = "nerve_masks_1.25"
+    cfg["data"]["prompts"] = ["background", "left_nerve", "right_nerve"]
+    cfg["data"]["structure_names"] = ["background", "left_nerve", "right_nerve"]
+    cfg["data"]["patch"]["positive_labels"] = [1, 2]
+    cfg["text_encoder"]["cache_file"] = "prompts_nerve.pt"
     return cfg

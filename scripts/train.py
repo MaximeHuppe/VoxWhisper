@@ -1,17 +1,19 @@
-"""Train VoxWhisper — thin CLI wrapping voxwhisper.training.loop."""
+"""Train VoxDense or VoxWhisper — thin CLI wrapping voxwhisper.training.loop."""
 from __future__ import annotations
 
 import argparse
 
-from voxwhisper.config import load_config
 from voxwhisper.training.loop import train_model
+from voxwhisper.util.config import load_config
 
 
 def main(argv=None) -> None:
-    parser = argparse.ArgumentParser(description="Train VoxWhisper")
+    parser = argparse.ArgumentParser(
+        description="Train the model named in the YAML (VoxDense or VoxWhisper)"
+    )
     parser.add_argument(
         "--config",
-        default="config/best_config.yaml",
+        default="config/voxdense.yaml",
         help="Path to YAML config (relative to project root or absolute)",
     )
     parser.add_argument(

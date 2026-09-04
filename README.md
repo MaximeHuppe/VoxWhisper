@@ -1,8 +1,8 @@
 # VoxWhisper
 
-3D multi-modal, language-grounded volumetric segmentation of white matter tracts.  
-Fuses a T1 and FA volume, aligns them with clinical text prompts (PubMedBERT), and
-produces prompt-conditioned segmentation masks.
+Two-stage brain-MRI specialist. **Phase 1 (this branch)** pretrains `VoxDense`: a T1-only language-conditioned UNet on FreeSurfer dense structures. Phase 2 (later) freezes that T1 encoder, adds an FA encoder, and segments unseen nerves from spatial descriptions.
+
+Do **not** train FA on FreeSurfer labels.
 
 ---
 
@@ -12,21 +12,29 @@ produces prompt-conditioned segmentation masks.
 # 1. Install
 pip install -e .
 
-# 2. Edit hyperparameters
-nano config/best_config.yaml
+# 2. Preprocess HCP T1 + wmparc onto the 1.25 mm grid
+python scripts/preprocess.py --config config/voxdense.yaml
 
-# 3. Train
-python scripts/train.py
+# 3. Train VoxDense
+python scripts/train.py --config config/voxdense.yaml
 
 # 4. Evaluate
 python scripts/evaluate.py --split test
 ```
 
+Edit [`config/voxdense.yaml`](config/voxdense.yaml) between runs. Structure names live in [`config/structures_dense.json`](config/structures_dense.json).
+
 ---
 
-## Tunable knobs (config/best_config.yaml)
+## Phase 1 model
 
-All experiment parameters live in one YAML file. No Python changes needed between runs.
+`T1 volume → encoder → PromptDecoder (frozen PubMedBERT names) → Decoder`
+
+The checkpoint stores `encoder_state_dict` so Phase 2 can reload the T1 encoder into dual `VoxWhisper`. The dual class stays in the tree but is not trained here.
+
+---
+
+## Tunable knobs (`config/voxdense.yaml`)
 
 | Key | Description |
 |---|---|
@@ -41,26 +49,27 @@ All experiment parameters live in one YAML file. No Python changes needed betwee
 | `training.checkpoint.keep` | Number of top-k checkpoints to keep |
 | `model.encoder.channels` | Encoder feature channels, e.g. `[32, 64, 128, 256]` |
 | `model.embed_dim` | Bottleneck / attention dimension |
-| `model.num_heads` | Attention heads in CrossVolumeAttention + PromptDecoder |
+| `model.num_heads` | Attention heads in PromptDecoder |
 | `data.patch.size` | Training patch size (D × H × W voxels) |
 | `data.patch.train_patches_per_subject` | Crops sampled per subject per epoch |
+| `data.patch.prompts_per_crop` | Name prompts sampled per train crop |
 | `data.patch.positive_ratio` | Fraction of crops centred on a foreground voxel |
-| `splits.*` | Train/val/test ratios and random seed |
+| `splits.*` | Train/val/test ratios; `subject_split` holds pretrain vs nerve holdout |
 | `logging.wandb.*` | W&B project, entity, tags |
 
 ---
 
-## Preprocessing pipeline
+## Preprocessing
 
-Run once before training. Data must be in `data/raw/{subject_id}/`.
+HCP FreeSurfer outputs already on disk under `data/raw/{subject_id}/`. Do not re-run `recon-all`. Work in **1.25 mm** space (`T1w_acpc_dc_restore_1.25.nii.gz`). `wmparc` and `brainmask_fs` are nearest-neighbour resampled onto that grid, then collapsed to a SynthSeg/OpenMind ~32-tissue set.
+
+Subjects with `nerve_masks_1.25` are held out for Phase 2 (`config/subject_split.json`). Training uses the pretrain split only. Do not train from `data/processed_T1_FA/`.
 
 ```bash
-# Step 0 — compute FA maps from raw diffusion (HCP layout)
-python scripts/compute_fa.py --workers 4
-
-# Steps 1–4 — normalise volumes, build label maps, cache embeddings
 python scripts/preprocess.py
 ```
+
+Writes `data/processed_dense/{subject}/t1.nii.gz` + `mask.nii.gz` and `cache/prompts_dense.pt`.
 
 ---
 
@@ -69,59 +78,27 @@ python scripts/preprocess.py
 ```
 VoxWhisper/
 ├── config/
-│   ├── best_config.yaml       ← only config file; edit this between runs
-│   └── structures.json        ← tract names, labels, and prompts
+│   ├── voxdense.yaml          ← Phase 1 experiment file
+│   ├── structures_dense.json  ← ~32 SynthSeg-style names + prompts
+│   └── subject_split.json     ← written by preprocess (pretrain vs nerve)
 │
-├── scripts/                   ← thin CLI wrappers
+├── scripts/
 │   ├── train.py
 │   ├── evaluate.py
 │   ├── preprocess.py
-│   └── compute_fa.py
+│   └── compute_fa.py          ← Phase 2; not required to train VoxDense
 │
-├── voxwhisper/                ← Python package (pip install -e .)
-│   ├── config.py              ← YAML loading, path helpers
-│   ├── run.py                 ← run directory management
-│   ├── seed.py                ← reproducible seeding
-│   ├── infer.py               ← sliding-window inference
-│   │
-│   ├── models/
-│   │   ├── vox_whisper.py     ← top-level model
-│   │   ├── encoder.py
-│   │   ├── attention.py
-│   │   └── decoder.py
-│   │
-│   ├── data/
-│   │   ├── dataset.py         ← patch-based PyTorch dataset
-│   │   ├── nifti_io.py        ← NIfTI I/O helpers
-│   │   ├── splits.py          ← train/val/test split management
-│   │   └── preprocess/
-│   │       ├── fa.py          ← DTI FA map computation
-│   │       ├── volumes.py     ← z-score normalisation
-│   │       ├── masks.py       ← tract mask → integer label map
-│   │       └── embeddings.py  ← PubMedBERT prompt caching
-│   │
+├── voxwhisper/
+│   ├── util/                  ← config, seed, run dirs, phase dispatch
+│   ├── models/vox_dense.py    ← Phase 1 model
+│   ├── models/vox_whisper.py  ← dual T1+FA class (Phase 2)
+│   ├── data/                  ← Python only (not NIfTIs)
 │   └── training/
-│       ├── loop.py            ← epoch loop + patch validation
-│       ├── loss.py            ← DiceBCELoss + deep_supervision_loss
-│       ├── metrics.py         ← Dice score utilities
-│       ├── checkpoint.py      ← top-k checkpoint management
-│       └── logger.py          ← JSONL + W&B logging
 │
 ├── tests/
-├── pyproject.toml
-└── requirements.txt
+├── cache/                     ← prompts_dense.pt (gitignored)
+└── data/                      ← on-disk volumes (gitignored processed/raw)
 ```
-
----
-
-## Model architecture
-
-Fixed four-step pipeline:
-
-1. **Dual encoders** — independent 3D UNet encoders for T1 (primary) and FA (secondary)
-2. **CrossVolumeAttention** — primary bottleneck tokens query secondary tokens via MHA, producing a spatially-aligned fused feature map
-3. **PromptDecoder** — frozen PubMedBERT embeddings query the fused visual map, producing language-aligned queries per tract
-4. **Hierarchical decoder** — skip connections + channel modulation at 3 scales with deep supervision
 
 ---
 
@@ -129,7 +106,7 @@ Fixed four-step pipeline:
 
 ```
 @misc{voxwhisper2026,
-  title        = {VoxWhisper: Language-Grounded 3D White Matter Tract Segmentation},
+  title        = {VoxWhisper: Language-Grounded 3D Brain MRI Segmentation},
   author       = {Huppe, Maxime},
   year         = {2026},
 }

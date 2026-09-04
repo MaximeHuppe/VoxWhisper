@@ -6,7 +6,12 @@ from pathlib import Path
 import torch
 import torch.nn as nn
 
-from voxwhisper.infer import SlidingWindowPredictor, predict_full_volume
+from voxwhisper.infer import (
+    SlidingWindowPredictor,
+    SlidingWindowPredictorDense,
+    predict_dense_volume,
+    predict_full_volume,
+)
 from voxwhisper.training.metrics import per_class_dice
 
 
@@ -29,6 +34,37 @@ class _RecordingNet(nn.Module):
         n_prompts = text.shape[1]
         full = (primary + secondary).expand(-1, n_prompts, -1, -1, -1).clone()
         return [full * 0.25, full * 0.5, full]
+
+
+def test_dense_predictor_returns_fullres():
+    class _DenseNet(nn.Module):
+        def forward(self, volume, text):
+            n_prompts = text.shape[1]
+            full = volume.expand(-1, n_prompts, -1, -1, -1).clone()
+            return [full, full]
+
+    model = _DenseNet()
+    text = torch.zeros(2, 8)
+    predictor = SlidingWindowPredictorDense(model, text)
+    inputs = torch.randn(2, 1, 16, 16, 16)
+    out = predictor(inputs)
+    assert out.shape == (2, 2, 16, 16, 16)
+
+
+def test_predict_dense_volume_matches_native_size():
+    class _DenseNet(nn.Module):
+        def forward(self, volume, text):
+            n_prompts = text.shape[1]
+            return [volume.expand(-1, n_prompts, -1, -1, -1).clone()]
+
+    model = _DenseNet()
+    text = torch.ones(1, 4)
+    volume = torch.randn(1, 1, 40, 37, 41)
+    logits = predict_dense_volume(
+        model, volume, text, roi_size=(32, 32, 32), sw_batch_size=2, overlap=0.5
+    )
+    assert logits.shape == (1, 1, 40, 37, 41)
+    torch.testing.assert_close(logits, volume, rtol=1e-4, atol=1e-4)
 
 
 def test_predictor_splits_concatenated_channels_and_returns_fullres():
@@ -112,13 +148,13 @@ def test_predict_restores_training_flag():
 
 
 def test_resolve_checkpoint_from_run_layout(tmp_path):
-    from voxwhisper.run import create_run_dir
+    from voxwhisper.util.run import create_run_dir
     from scripts.evaluate import resolve_checkpoint
 
     cfg = {
         "data": {
             "paths": {
-                "processed": str(tmp_path / "processed_T1_FA"),
+                "processed": str(tmp_path / "processed_dense"),
                 "runs": str(tmp_path / "runs"),
                 "cache": str(tmp_path / "cache"),
             },

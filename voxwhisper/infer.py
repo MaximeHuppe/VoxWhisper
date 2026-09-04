@@ -8,7 +8,7 @@ import torch
 import torch.nn as nn
 from monai.inferers import sliding_window_inference
 
-from voxwhisper.config import resolve_path
+from voxwhisper.util.config import resolve_path
 from voxwhisper.data.nifti_io import load_nifti, mask_path, volume_path
 
 RoiSize = Union[Sequence[int], int]
@@ -16,6 +16,74 @@ RoiSize = Union[Sequence[int], int]
 # Fixed modalities for this branch.
 _PRIMARY_CHANNELS = 1
 _SECONDARY_CHANNELS = 1
+
+
+class SlidingWindowPredictorDense:
+    """Adapt VoxDense's ``(volume, text)`` forward to MONAI's single-tensor API."""
+
+    def __init__(self, model: nn.Module, text_embeddings: torch.Tensor) -> None:
+        self.model = model
+        if text_embeddings.dim() == 3:
+            text_embeddings = text_embeddings[0]
+        if text_embeddings.dim() != 2:
+            raise ValueError(
+                "text_embeddings must be [N_T, dim] or [B, N_T, dim], "
+                f"got shape {tuple(text_embeddings.shape)}"
+            )
+        self.text_embeddings = text_embeddings.detach().contiguous()
+
+    def __call__(self, inputs: torch.Tensor) -> torch.Tensor:
+        if inputs.ndim != 5 or inputs.shape[1] != 1:
+            raise ValueError(
+                f"Expected T1 input [B, 1, D, H, W], got {tuple(inputs.shape)}"
+            )
+        text = self.text_embeddings.to(device=inputs.device, dtype=inputs.dtype)
+        text = text.unsqueeze(0).expand(inputs.shape[0], -1, -1)
+        predictions = self.model(inputs, text)
+        if isinstance(predictions, (list, tuple)):
+            return predictions[-1]
+        return predictions
+
+
+def predict_dense_volume(
+    model: nn.Module,
+    volume: torch.Tensor,
+    text_embeddings: torch.Tensor,
+    roi_size: RoiSize = (128, 128, 128),
+    sw_batch_size: int = 2,
+    overlap: float = 0.5,
+    mode: str = "gaussian",
+    sigma_scale: float = 0.125,
+    padding_mode: str = "constant",
+    progress: bool = False,
+    sw_device: Optional[torch.device] = None,
+    device: Optional[torch.device] = None,
+) -> torch.Tensor:
+    """Sliding-window inference for a T1-only ``VoxDense`` model."""
+    if volume.ndim != 5:
+        raise ValueError(f"Expected volume [B, C, D, H, W], got {tuple(volume.shape)}")
+
+    predictor = SlidingWindowPredictorDense(model, text_embeddings)
+    was_training = model.training
+    model.eval()
+    try:
+        with torch.no_grad():
+            return sliding_window_inference(
+                inputs=volume,
+                roi_size=tuple(int(x) for x in roi_size),
+                sw_batch_size=int(sw_batch_size),
+                predictor=predictor,
+                overlap=float(overlap),
+                mode=mode,
+                sigma_scale=sigma_scale,
+                padding_mode=padding_mode,
+                progress=progress,
+                sw_device=sw_device,
+                device=device,
+            )
+    finally:
+        if was_training:
+            model.train()
 
 
 class SlidingWindowPredictor:
@@ -164,6 +232,34 @@ def load_subject_for_inference(
         labels = np.rint(labels_f).astype(np.int16)
 
     return primary, secondary, labels, affine
+
+
+def load_dense_subject_for_inference(
+    config: Mapping,
+    subject_id: str,
+) -> Tuple[np.ndarray, Optional[np.ndarray], np.ndarray]:
+    """Load full-resolution T1, optional mask, and T1 affine."""
+    processed_dir = resolve_path(config, "data.paths.processed")
+    volume, affine = load_nifti(volume_path(processed_dir, subject_id, "t1"))
+
+    labels: Optional[np.ndarray] = None
+    mpath = mask_path(processed_dir, subject_id)
+    if mpath.exists():
+        labels_f, _ = load_nifti(mpath)
+        if labels_f.ndim != 3:
+            raise ValueError(f"Expected 3D mask at {mpath}, got {labels_f.shape}")
+        if labels_f.shape != volume.shape:
+            raise ValueError(
+                f"Mask shape {labels_f.shape} != T1 shape {volume.shape} for {subject_id}"
+            )
+        labels = np.rint(labels_f).astype(np.int16)
+
+    return volume, labels, affine
+
+
+def volume_to_tensor(volume: np.ndarray) -> torch.Tensor:
+    """``(D, H, W)`` NumPy → ``[1, 1, D, H, W]`` float tensor."""
+    return torch.from_numpy(np.ascontiguousarray(volume)).float().unsqueeze(0).unsqueeze(0)
 
 
 def volumes_to_tensors(

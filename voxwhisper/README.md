@@ -1,93 +1,76 @@
-# `src/` — model, dataset, inference
+# `voxwhisper/` — model, dataset, inference
 
-Core library for VoxWhisper. Entry scripts live under [`../pipeline/`](../pipeline/README.md); this package is what they import.
+Installable package (`pip install -e .`). CLIs live under [`../scripts/`](../scripts/).
 
-## Model (`models/`)
+## `util/`
 
-Four-step forward: dual 3D encoders → bottleneck cross-volume attention → language–visual prompt decoder → hierarchical decoder with deep supervision.
-
-```
-primary_volume ──► primary_encoder ──► bottleneck + skips
-secondary_volume ► secondary_encoder ► bottleneck (skips discarded)
-                         │
-                         ▼
-              CrossVolumeAttention  (Q=primary, KV=secondary)
-                         │
- text_embeddings ──► PromptDecoder  (Q=text, KV=fused map)
-                         │
-                         ▼
-              Decoder(+ StageVLFusion)  → [pred×1/4, pred×1/2, pred×1]
-```
-
-| Module | File | Role |
-|--------|------|------|
-| `VoxWhisper` | `models/vox_whisper.py` | Wires the pipeline; `from_config(cfg)` |
-| `Encoder` | `models/encoder.py` | Stem + downsampling stages; returns `(bottleneck, skips)` |
-| `CrossVolumeAttention` | `models/attention.py` | Aligns secondary features onto the primary grid |
-| `PromptDecoder` | `models/attention.py` | Projects PubMedBERT tokens into visual space |
-| `Decoder` / `StageVLFusionBlock` | `models/decoder.py` | Upsample + skip concat + FiLM-style channel gate + per-prompt mask logits |
-
-**Coordinate space.** Predictions and skip connections are always in **primary** space (T1 by default). Secondary only contributes at the bottleneck via cross-attention.
-
-**Typical shapes** (default `patch.size = [128,128,128]`, three stride-2 stages):
-
-- Patch / full-res prediction: `[B, N_T, 128, 128, 128]`
-- Bottleneck: `[B, 128, 16, 16, 16]`
-- Deep-supervision stages: spatial `×1/4`, `×1/2`, `×1` (length of `training.deep_supervision_weights` must match)
-
-Positional encodings are sized from `patch.size` and encoder `strides` in `from_config`. If a forward pass sees a different bottleneck size, the PE grid is trilinearly interpolated.
-
-**Secondary channels.** `model.input_channels` feeds the primary encoder; optional `model.secondary_encoder.input_channels` can differ (e.g. multi-channel MD later). Old checkpoints that used `t1_encoder` / `t2_encoder` keys are remapped in `utils/checkpoint.py`.
-
-## How the dataset is generated
-
-Two layers: offline NIfTI on disk, then online patch sampling.
-
-### Offline (see [`../preprocess/README.md`](../preprocess/README.md))
-
-Per subject under `data/processed/{subject_id}/`:
-
-| File | Content |
-|------|---------|
-| `{primary}.nii.gz` | e.g. `t1.nii.gz` — z-scored structural |
-| `{secondary}.nii.gz` | e.g. `t2.nii.gz` — same grid as primary |
-| `mask.nii.gz` | Integer labels (0 = background, 1…K = tracts from `structures.json`) |
-
-Plus a shared prompt tensor at `cache/{text_encoder.cache_file}` with shape `[N_T, text_dim]` (one mean-pooled embedding per prompt, including background).
-
-Filenames on disk follow `data.modalities.primary` / `secondary` (and `data.volumes.*`). The Python API always talks about **primary** / **secondary**.
-
-### Online (`dataset.py`)
-
-`VoxWhisperDataset` loads full volumes and returns fixed-size crops:
-
-| Mode | Behavior |
-|------|----------|
-| `training=True` | `train_patches_per_subject` crops per subject per epoch; 50/50 chance of centering on a positive voxel (`patch.positive_ratio`) vs a random valid center |
-| `training=False` | `val_patches_per_subject` frozen centers per subject (seeded by `splits.seed`); stable across epochs |
-
-Each item is `(primary, secondary, text_embeddings, gt_mask)`:
-
-- volumes: `[1, D, H, W]` float
-- text: `[N_T, text_dim]` (shared cache, not subject-specific)
-- mask: `[N_T, D, H, W]` one-hot float from the integer label map
-
-Subject lists come from a split manifest (`data/splits.json`) when `splits.enabled` is true.
-
-## Inference (`infer.py`)
-
-`predict_full_volume` packs primary+secondary along the channel axis and runs MONAI `sliding_window_inference` with Gaussian blending. Only the full-resolution decoder stage is stitched back to the native grid.
-
-## Utilities (`utils/`)
+Shared plumbing used by both stages. Import from here, not from the package root:
 
 | Module | Role |
 |--------|------|
-| `config.py` | Load YAML, resolve paths, inject prompts from `structures.json` |
-| `run.py` | Timestamped run dirs under `runs/{dataset}/{run_name}/`; config + meta snapshots |
-| `logger.py` | Per-epoch `metrics.jsonl` + stdout table |
-| `nifti_io.py` | Load/save NIfTI, patch extract, path helpers |
-| `metrics.py` | `DiceBCELoss`, deep-supervision helper, Dice scores |
-| `checkpoint.py` | Top-k / periodic / latest saves; legacy state-dict remap |
-| `validate.py` | Patch and full-volume val used during training |
-| `splits.py` | Create or load train/val/test subject lists |
-| `seed.py` | Global + DataLoader worker seeding |
+| `util/config.py` | YAML load, path resolve, structure injection |
+| `util/seed.py` | Global RNG + DataLoader worker seeds |
+| `util/run.py` | Timestamped run directories and checkpoint lookup |
+| `util/stage.py` | Phase 1 vs 2 dispatch (model, dataset, cohort, batch unpack) |
+
+`scripts/preprocess.py`, `scripts/train.py`, and `scripts/evaluate.py` take `--config` and follow `model.name`.
+
+## Models
+
+**Phase 1 — `VoxDense`** (`models/vox_dense.py`):
+
+```
+T1 ──► encoder ──► bottleneck + skips
+              │
+ text_embeddings ──► PromptDecoder  (Q=text, KV=T1 bottleneck)
+              │
+              ▼
+ Decoder(+ StageVLFusion)  → [pred×1/4, pred×1/2, pred×1]
+```
+
+**Phase 2 — `VoxWhisper`** (`models/vox_whisper.py`): dual T1+FA encoders + `CrossVolumeAttention`. Not trained in Phase 1. Load Phase 1 `encoder` weights into `primary_encoder` later.
+
+| Module | File | Role |
+|--------|------|------|
+| `VoxDense` | `models/vox_dense.py` | T1-only; `from_config(cfg)` |
+| `VoxWhisper` | `models/vox_whisper.py` | Dual T1+FA (Phase 2) |
+| `Encoder` | `models/encoder.py` | Stem + downsampling; `(bottleneck, skips)` |
+| `PromptDecoder` | `models/attention.py` | Projects PubMedBERT tokens into visual space |
+| `CrossVolumeAttention` | `models/attention.py` | Unused until Phase 2 |
+| `Decoder` | `models/decoder.py` | Upsample + skip concat + per-prompt mask logits |
+
+Typical shapes (`patch.size = [128,128,128]`, three stride-2 stages):
+
+- Patch / full-res prediction: `[B, N_T, 128, 128, 128]`
+- Bottleneck: `[B, 256, 16, 16, 16]`
+- Deep-supervision stages: spatial `×1/4`, `×1/2`, `×1`
+
+## Dataset
+
+Offline NIfTI under `data/processed_dense/{subject_id}/`:
+
+| File | Content |
+|------|---------|
+| `t1.nii.gz` | z-scored 1.25 mm T1 (brain-masked) |
+| `mask.nii.gz` | Integer dense labels (0 = background, 1…32 = SynthSeg-style tissues) |
+
+Shared prompt tensor at `cache/prompts_dense.pt` with shape `[N_T, text_dim]`.
+
+`VoxDenseDataset` returns `(volume, text_embeddings, gt_mask)`:
+
+| Mode | Behavior |
+|------|----------|
+| `training=True` | `train_patches_per_subject` crops; sample `prompts_per_crop` foreground names |
+| `training=False` | frozen centers; **all** name prompts |
+
+`VoxWhisperDataset` (T1+FA) remains for Phase 2.
+
+Subject lists come from `data/splits.json`, restricted to the `pretrain` side of `config/subject_split.json`.
+
+## Inference
+
+`predict_dense_volume` runs MONAI sliding-window inference on T1 only. Dual `predict_full_volume` is kept for Phase 2.
+
+## Checkpoints
+
+`save_checkpoint` writes `model_state_dict` plus `encoder_state_dict`. Phase 2 reloads with `load_encoder_state`.

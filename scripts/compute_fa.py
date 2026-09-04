@@ -4,7 +4,7 @@ from __future__ import annotations
 import argparse
 import logging
 
-from voxwhisper.config import load_config
+from voxwhisper.util.config import load_config
 from voxwhisper.data.preprocess.fa import compute_fa_cohort
 
 
@@ -17,7 +17,7 @@ def main(argv=None) -> None:
         description="Compute DTI FA maps from HCP diffusion data",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument("--config", default="config/best_config.yaml")
+    parser.add_argument("--config", default="config/voxdense.yaml")
     parser.add_argument("--subject", default=None, metavar="ID",
                         help="Process a single subject instead of the full cohort")
     parser.add_argument("--delete-raw", action="store_true", default=False,

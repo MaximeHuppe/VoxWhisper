@@ -164,4 +164,22 @@ def save_checkpoint(path, epoch, model, optimizer, metrics, config, extra=None):
     }
     if extra:
         payload.update(extra)
+    if hasattr(model, "encoder"):
+        payload["encoder_state_dict"] = model.encoder.state_dict()
     torch.save(payload, path)
+
+
+def load_encoder_state(model, state_dict, strict: bool = True):
+    """Load an ``encoder`` submodule from a VoxDense (or encoder-only) checkpoint."""
+    if "encoder_state_dict" in state_dict:
+        encoder_sd = state_dict["encoder_state_dict"]
+    elif any(k.startswith("encoder.") for k in state_dict):
+        encoder_sd = {
+            k.split("encoder.", 1)[1]: v
+            for k, v in state_dict.items()
+            if k.startswith("encoder.")
+        }
+    else:
+        encoder_sd = state_dict
+    target = model.encoder if hasattr(model, "encoder") else model
+    return target.load_state_dict(encoder_sd, strict=strict)

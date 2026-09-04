@@ -9,34 +9,36 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from voxwhisper.config import ensure_dir, load_config, resolve_path
+from voxwhisper.util.config import ensure_dir, load_config, resolve_path
 from voxwhisper.data.nifti_io import (
     label_to_multichannel,
     list_subject_ids,
-    mask_path,
     save_nifti,
-    volume_path,
 )
 from voxwhisper.data.splits import create_or_load_splits
 from voxwhisper.infer import (
+    load_dense_subject_for_inference,
+    load_subject_for_inference,
     load_text_embeddings,
     logits_to_label_map,
+    predict_dense_volume,
     predict_full_volume,
+    volume_to_tensor,
     volumes_to_tensors,
 )
-from voxwhisper.models import VoxWhisper
-from voxwhisper.run import (
+from voxwhisper.util.run import (
     find_checkpoint_for_eval,
     predictions_dir,
     resolve_run_dir_for_eval,
 )
 from voxwhisper.training.checkpoint import load_model_state
 from voxwhisper.training.metrics import channel_dice_from_logits, per_class_dice
+from voxwhisper.util.stage import build_model, uses_secondary
 
 
 def _parse_args(argv=None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Evaluate VoxWhisper")
-    parser.add_argument("--config", default="config/best_config.yaml")
+    parser = argparse.ArgumentParser(description="Evaluate VoxDense or VoxWhisper")
+    parser.add_argument("--config", default="config/voxdense.yaml")
     parser.add_argument("--checkpoint", default=None)
     parser.add_argument("--run-dir", default=None)
     parser.add_argument("--split", default=None)
@@ -46,7 +48,7 @@ def _parse_args(argv=None) -> argparse.Namespace:
 
 
 def _as_path(value: str) -> Path:
-    from voxwhisper.config import get_project_root
+    from voxwhisper.util.config import get_project_root
     path = Path(value)
     return path if path.is_absolute() else get_project_root() / path
 
@@ -103,8 +105,8 @@ def pick_device() -> torch.device:
     return torch.device("cpu")
 
 
-def load_model(config, checkpoint_path: Path, device: torch.device) -> VoxWhisper:
-    model = VoxWhisper.from_config(config).to(device)
+def load_model(config, checkpoint_path: Path, device: torch.device):
+    model = build_model(config).to(device)
     try:
         ckpt = torch.load(checkpoint_path, map_location=device, weights_only=True)
     except Exception:
@@ -115,41 +117,36 @@ def load_model(config, checkpoint_path: Path, device: torch.device) -> VoxWhispe
     return model
 
 
-def load_subject_volumes(config, subject_id: str):
-    """Load primary (T1) and secondary (FA) volumes plus optional GT mask."""
-    processed_dir = resolve_path(config, "data.paths.processed")
-    from voxwhisper.data.nifti_io import load_nifti
-    primary, affine = load_nifti(volume_path(processed_dir, subject_id, "t1"))
-    secondary, _ = load_nifti(volume_path(processed_dir, subject_id, "fa"))
-    mpath = mask_path(processed_dir, subject_id)
-    labels = None
-    if mpath.exists():
-        labels_f, _ = load_nifti(mpath)
-        labels = np.rint(labels_f).astype(np.int16)
-    return primary, secondary, labels, affine
-
-
 def evaluate_subject(model, config, subject_id, text_embeddings, device, output_dir):
     inf_cfg = config.get("inference", {})
     patch_size = tuple(int(x) for x in config["data"]["patch"]["size"])
     prompts = list(config["data"]["prompts"])
     n_prompts = len(prompts)
     threshold = float(inf_cfg.get("threshold", 0.5))
+    sw_kwargs = dict(
+        roi_size=patch_size,
+        sw_batch_size=int(inf_cfg.get("sw_batch_size", 2)),
+        overlap=float(inf_cfg.get("overlap", 0.5)),
+        mode=str(inf_cfg.get("mode", "gaussian")),
+        sigma_scale=float(inf_cfg.get("sigma_scale", 0.125)),
+        progress=bool(inf_cfg.get("progress", True)),
+    )
 
-    primary_np, secondary_np, labels_np, affine = load_subject_volumes(config, subject_id)
-    primary, secondary = volumes_to_tensors(primary_np, secondary_np)
-
-    with torch.no_grad():
-        logits = predict_full_volume(
-            model, primary.to(device), secondary.to(device),
-            text_embeddings.to(device),
-            roi_size=patch_size,
-            sw_batch_size=int(inf_cfg.get("sw_batch_size", 2)),
-            overlap=float(inf_cfg.get("overlap", 0.5)),
-            mode=str(inf_cfg.get("mode", "gaussian")),
-            sigma_scale=float(inf_cfg.get("sigma_scale", 0.125)),
-            progress=bool(inf_cfg.get("progress", True)),
-        )
+    if uses_secondary(config):
+        primary_np, secondary_np, labels_np, affine = load_subject_for_inference(config, subject_id)
+        primary, secondary = volumes_to_tensors(primary_np, secondary_np)
+        with torch.no_grad():
+            logits = predict_full_volume(
+                model, primary.to(device), secondary.to(device),
+                text_embeddings.to(device), **sw_kwargs,
+            )
+    else:
+        volume_np, labels_np, affine = load_dense_subject_for_inference(config, subject_id)
+        volume = volume_to_tensor(volume_np)
+        with torch.no_grad():
+            logits = predict_dense_volume(
+                model, volume.to(device), text_embeddings.to(device), **sw_kwargs,
+            )
 
     pred_labels = logits_to_label_map(logits)[0].cpu()
     subject_dir = ensure_dir(output_dir / subject_id)

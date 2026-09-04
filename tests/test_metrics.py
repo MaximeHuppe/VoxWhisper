@@ -59,15 +59,18 @@ def test_dice_bce_from_config():
 
 def test_named_foreground_dice_drops_background():
     scores = [0.99, 0.8, 0.0, 0.4]
-    named = named_foreground_dice(scores, ["background", "ATR_left", "ATR_right", "CG_left"])
-    assert named == {"ATR_left": 0.8, "ATR_right": 0.0, "CG_left": 0.4}
+    named = named_foreground_dice(scores, ["background", "left_thalamus", "right_thalamus", "brainstem"])
+    assert named == {"left_thalamus": 0.8, "right_thalamus": 0.0, "brainstem": 0.4}
     assert named_foreground_dice(scores) == {"c1": 0.8, "c2": 0.0, "c3": 0.4}
 
 
 def test_load_config_injects_structure_names():
-    from voxwhisper.config import load_config
+    from voxwhisper.util.config import load_config
     cfg = load_config()
     names = cfg["data"]["structure_names"]
     assert names[0] == "background"
-    assert "ATR_left" in names
+    assert "left_thalamus" in names
+    assert "brainstem" in names
+    assert len(names) == 33
     assert len(names) == len(cfg["data"]["prompts"])
+    assert cfg["model"]["name"] == "VoxDense"

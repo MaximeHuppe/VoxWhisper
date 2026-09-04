@@ -1,13 +1,15 @@
-"""Preprocessing utilities for the VoxWhisper T1+FA pipeline."""
-from .fa import compute_fa_cohort, compute_fa_subject
-from .volumes import preprocess_volumes
-from .masks import preprocess_masks
+"""Preprocessing utilities for the VoxDense T1 pipeline."""
 from .embeddings import cache_embedding
+from .fa import compute_fa_cohort, compute_fa_subject
+from .freesurfer import collapse_wmparc
+from .masks import preprocess_masks
+from .volumes import preprocess_volumes
 
 __all__ = [
+    "cache_embedding",
+    "collapse_wmparc",
     "compute_fa_cohort",
     "compute_fa_subject",
-    "preprocess_volumes",
     "preprocess_masks",
-    "cache_embedding",
+    "preprocess_volumes",
 ]

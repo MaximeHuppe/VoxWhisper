@@ -9,14 +9,16 @@ import yaml
 
 PathLike = Union[str, Path]
 
-# T1 is always primary, FA is always secondary in this branch.
+# T1 is the Phase 1 (VoxDense) volume. FA is only used by Phase 2 VoxWhisper.
 PRIMARY_MODALITY = "t1"
 SECONDARY_MODALITY = "fa"
+DEFAULT_CONFIG = "config/voxdense.yaml"
 
 
 def get_project_root() -> Path:
-    """Return the repository root (parent of voxwhisper/)."""
-    return Path(__file__).resolve().parent.parent
+    """Return the repository root (parent of the ``voxwhisper`` package)."""
+    # voxwhisper/util/config.py → util → voxwhisper → repo
+    return Path(__file__).resolve().parents[2]
 
 
 def resolve_path(config: Mapping[str, Any], key_path: str) -> Path:
@@ -42,9 +44,9 @@ def ensure_dir(path: Path) -> Path:
 
 
 def load_config(path: Optional[PathLike] = None) -> dict:
-    """Load a YAML config file. Defaults to config/best_config.yaml."""
+    """Load a YAML config file. Defaults to config/voxdense.yaml."""
     if path is None:
-        config_path = get_project_root() / "config" / "best_config.yaml"
+        config_path = get_project_root() / DEFAULT_CONFIG
     else:
         config_path = Path(path)
         if not config_path.is_absolute():

@@ -28,17 +28,13 @@ from typing import Any, Mapping, Optional, Sequence
 
 import yaml
 
-from voxwhisper.config import ensure_dir, get_project_root, resolve_path
+from voxwhisper.util.config import ensure_dir, get_project_root, resolve_path
 
 _RUN_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 _TIMESTAMP_RE = re.compile(r"^\d{8}_\d{6}$")
 _LATEST_CKPT = "vox_whisper_latest.pt"
 _PREFERRED_CKPTS = ("vox_whisper_best.pt", "vox_whisper_top1.pt")
 
-
-# ---------------------------------------------------------------------------
-# Name / path helpers
-# ---------------------------------------------------------------------------
 
 def validate_run_name(name: str) -> str:
     """Return a validated, stripped run name or raise ``ValueError``."""
@@ -94,10 +90,6 @@ def _as_project_path(value: str | Path) -> Path:
     return path if path.is_absolute() else get_project_root() / path
 
 
-# ---------------------------------------------------------------------------
-# Timestamp children
-# ---------------------------------------------------------------------------
-
 def list_timestamp_runs(family_dir: Path) -> list[Path]:
     """Sorted timestamp child dirs under a family (oldest first)."""
     if not family_dir.is_dir():
@@ -115,10 +107,6 @@ def find_latest_run_dir(family_dir: Path) -> Optional[Path]:
             return path
     return None
 
-
-# ---------------------------------------------------------------------------
-# Snapshots written at run creation
-# ---------------------------------------------------------------------------
 
 def write_config_snapshot(run_dir: Path, config: Mapping[str, Any]) -> Path:
     """Dump the resolved config (including injected prompts) as ``config.yaml``."""
@@ -154,18 +142,20 @@ def write_meta(
         "platform": platform.platform(),
         "modalities": {"primary": "t1", "secondary": "fa"},
     }
-    # Best-effort git info
     try:
         root = get_project_root()
-        sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root,
-                                       stderr=subprocess.DEVNULL, text=True).strip()
-        dirty = bool(subprocess.check_output(["git", "status", "--porcelain"], cwd=root,
-                                              stderr=subprocess.DEVNULL, text=True).strip())
+        sha = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=root, stderr=subprocess.DEVNULL, text=True
+        ).strip()
+        dirty = bool(
+            subprocess.check_output(
+                ["git", "status", "--porcelain"], cwd=root, stderr=subprocess.DEVNULL, text=True
+            ).strip()
+        )
         meta["git_sha"] = sha
         meta["git_dirty"] = dirty
     except (OSError, subprocess.CalledProcessError):
         meta["git_sha"] = meta["git_dirty"] = None
-    # Best-effort torch info
     try:
         import torch
         meta["torch_version"] = torch.__version__
@@ -178,10 +168,6 @@ def write_meta(
     path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
     return path
 
-
-# ---------------------------------------------------------------------------
-# Run creation / resume
-# ---------------------------------------------------------------------------
 
 def create_run_dir(
     config: Mapping[str, Any],
@@ -199,8 +185,16 @@ def create_run_dir(
         raise ValueError(f"timestamp must be YYYYMMDD_HHMMSS, got {stamp!r}")
     run_dir = ensure_dir(run_family_dir(config) / stamp)
     write_config_snapshot(run_dir, config)
-    write_meta(run_dir, config=config, run_name=run_name, dataset=dataset,
-               config_path=config_path, seed=seed, argv=argv, resume=False)
+    write_meta(
+        run_dir,
+        config=config,
+        run_name=run_name,
+        dataset=dataset,
+        config_path=config_path,
+        seed=seed,
+        argv=argv,
+        resume=False,
+    )
     return run_dir
 
 
@@ -227,10 +221,16 @@ def create_or_resume_run(
         if not (path / "config.yaml").exists():
             write_config_snapshot(path, config)
         if not (path / "meta.json").exists():
-            write_meta(path, config=config,
-                       run_name=resolve_run_name(config),
-                       dataset=dataset_name_from_config(config),
-                       config_path=config_path, seed=seed, argv=argv, resume=resume)
+            write_meta(
+                path,
+                config=config,
+                run_name=resolve_run_name(config),
+                dataset=dataset_name_from_config(config),
+                config_path=config_path,
+                seed=seed,
+                argv=argv,
+                resume=resume,
+            )
         return path
 
     family = run_family_dir(config)
@@ -239,14 +239,13 @@ def create_or_resume_run(
         latest = find_latest_run_dir(family)
         if latest is not None:
             return latest
-        print(f"Warning: --resume requested but no prior run found under {family} — starting a new run")
+        print(
+            f"Warning: --resume requested but no prior run found under {family} "
+            "— starting a new run"
+        )
 
     return create_run_dir(config, config_path=config_path, seed=seed, argv=argv)
 
-
-# ---------------------------------------------------------------------------
-# Checkpoint resolution
-# ---------------------------------------------------------------------------
 
 def _checkpoint_epoch(path: Path) -> int:
     try:

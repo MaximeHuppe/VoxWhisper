@@ -1,7 +1,7 @@
-"""Training loop for VoxWhisper.
+"""Training loop for VoxDense (Phase 1) and VoxWhisper (Phase 2).
 
-Single happy path: splits on, patch-Dice top-k, no gradient accumulation,
-no volume-level Dice, no pos-weight.  All tunable knobs come from YAML.
+The model, dataset, and forward signature come from ``voxwhisper.util.stage``.
+All tunable knobs come from YAML.
 """
 from __future__ import annotations
 
@@ -12,11 +12,7 @@ from typing import Optional, Sequence
 import torch
 from torch.utils.data import DataLoader
 
-from voxwhisper.data.dataset import VoxWhisperDataset
 from voxwhisper.data.splits import create_or_load_splits
-from voxwhisper.models.vox_whisper import VoxWhisper
-from voxwhisper.run import create_or_resume_run
-from voxwhisper.seed import get_training_seed, set_global_seed, worker_init_fn
 from voxwhisper.training.checkpoint import (
     TopKCheckpoints,
     load_model_state,
@@ -26,6 +22,15 @@ from voxwhisper.training.checkpoint import (
 from voxwhisper.training.logger import TrainingLogger
 from voxwhisper.training.loss import DiceBCELoss, deep_supervision_loss
 from voxwhisper.training.metrics import channel_dice_from_logits, named_foreground_dice
+from voxwhisper.util.run import create_or_resume_run
+from voxwhisper.util.seed import get_training_seed, set_global_seed, worker_init_fn
+from voxwhisper.util.stage import (
+    build_dataset,
+    build_model,
+    forward_model,
+    stage_id,
+    unpack_batch,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -65,13 +70,15 @@ def evaluate_patches(
     n_batches = 0
     per_patch_scores: list[list[float]] = []
 
-    for primary_vol, secondary_vol, text_emb, gt_mask in loader:
-        primary_vol = primary_vol.to(device)
-        secondary_vol = secondary_vol.to(device)
+    for batch in loader:
+        primary, secondary, text_emb, gt_mask = unpack_batch(batch)
+        primary = primary.to(device)
         text_emb = text_emb.to(device)
         gt_mask = gt_mask.to(device)
+        if secondary is not None:
+            secondary = secondary.to(device)
 
-        predictions = model(primary_vol, secondary_vol, text_emb)
+        predictions = forward_model(model, primary, secondary, text_emb)
         total_loss += deep_supervision_loss(
             predictions, gt_mask, criterion, deep_sup_weights
         ).item()
@@ -119,8 +126,8 @@ def build_loaders(config: dict, seed: int):
     train_generator.manual_seed(seed)
 
     splits = create_or_load_splits(config)
-    train_dataset = VoxWhisperDataset(config, subject_ids=splits["train"], training=True)
-    val_dataset = VoxWhisperDataset(config, subject_ids=splits["val"], training=False)
+    train_dataset = build_dataset(config, subject_ids=splits["train"], training=True)
+    val_dataset = build_dataset(config, subject_ids=splits["val"], training=False)
 
     train_loader = DataLoader(
         train_dataset,
@@ -175,7 +182,7 @@ def _print_run_header(config, run_path, device, seed, train_loader, val_loader, 
 
     sep = "─" * 66
     print(sep)
-    print(f"  VoxWhisper  ·  {train_cfg.get('run_name', '?')}")
+    print(f"  {stage_id(config):<10}  ·  {train_cfg.get('run_name', '?')}")
     print(sep)
     print(f"  Run        {run_path}")
     print(f"  Device     {device:<20}  Seed  {seed}")
@@ -226,7 +233,7 @@ def train_model(
     )
     train_loader, val_loader = build_loaders(config, seed)
 
-    model = VoxWhisper.from_config(config).to(device)
+    model = build_model(config).to(device)
     n_decoder_stages = len(model.decoder.up_blocks)
     if len(deep_sup_weights) != n_decoder_stages:
         raise ValueError(
@@ -280,14 +287,16 @@ def train_model(
             epoch_loss = 0.0
             optimizer.zero_grad()
 
-            for primary_vol, secondary_vol, text_emb, gt_mask in train_loader:
-                primary_vol = primary_vol.to(device, non_blocking=True)
-                secondary_vol = secondary_vol.to(device, non_blocking=True)
+            for batch in train_loader:
+                primary, secondary, text_emb, gt_mask = unpack_batch(batch)
+                primary = primary.to(device, non_blocking=True)
                 text_emb = text_emb.to(device, non_blocking=True)
                 gt_mask = gt_mask.to(device, non_blocking=True)
+                if secondary is not None:
+                    secondary = secondary.to(device, non_blocking=True)
 
                 with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=use_amp):
-                    predictions = model(primary_vol, secondary_vol, text_emb)
+                    predictions = forward_model(model, primary, secondary, text_emb)
                     batch_loss = deep_supervision_loss(
                         predictions, gt_mask, criterion, deep_sup_weights
                     )

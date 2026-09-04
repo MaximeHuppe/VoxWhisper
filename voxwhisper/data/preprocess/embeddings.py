@@ -6,7 +6,7 @@ from pathlib import Path
 import torch
 from transformers import AutoModel, AutoTokenizer
 
-from voxwhisper.config import ensure_dir
+from voxwhisper.util.config import ensure_dir
 
 
 def cache_embedding(prompt_list: list, output_path: Path, model_name: str) -> None:

@@ -104,23 +104,25 @@ def required_processed_paths(
     processed_root: PathLike,
     subject_id: str,
     primary: str,
-    secondary: str,
+    secondary: Optional[str] = None,
 ) -> dict[str, Path]:
-    """Primary volume, secondary volume, and integer mask for one subject."""
-    return {
+    """Primary volume, integer mask, and optional secondary volume."""
+    paths = {
         primary: volume_path(processed_root, subject_id, primary),
-        secondary: volume_path(processed_root, subject_id, secondary),
         "mask": mask_path(processed_root, subject_id),
     }
+    if secondary:
+        paths[secondary] = volume_path(processed_root, subject_id, secondary)
+    return paths
 
 
 def subject_is_complete(
     processed_root: PathLike,
     subject_id: str,
     primary: str,
-    secondary: str,
+    secondary: Optional[str] = None,
 ) -> bool:
-    """True when both modalities and the mask exist as files."""
+    """True when the required volumes and the mask exist as files."""
     return all(
         path.is_file()
         for path in required_processed_paths(

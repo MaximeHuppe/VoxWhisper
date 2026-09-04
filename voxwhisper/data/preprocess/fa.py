@@ -37,7 +37,7 @@ from dipy.core.gradients import gradient_table
 from dipy.reconst import dti
 from tqdm import tqdm
 
-from voxwhisper.config import ensure_dir, resolve_path
+from voxwhisper.util.config import ensure_dir, resolve_path
 
 logger = logging.getLogger(__name__)
 

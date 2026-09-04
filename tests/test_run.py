@@ -6,7 +6,7 @@ import json
 import pytest
 import yaml
 
-from voxwhisper.run import (
+from voxwhisper.util.run import (
     create_or_resume_run,
     create_run_dir,
     dataset_name_from_config,
@@ -21,7 +21,7 @@ from voxwhisper.run import (
 )
 
 
-def _cfg(tmp_path, *, run_name: str = "baseline", processed: str = "processed_T1_FA") -> dict:
+def _cfg(tmp_path, *, run_name: str = "baseline", processed: str = "processed_dense") -> dict:
     return {
         "data": {
             "paths": {
@@ -49,9 +49,9 @@ def test_validate_run_name_rejects_unsafe():
 
 def test_dataset_and_family_from_config(tmp_path):
     cfg = _cfg(tmp_path)
-    assert dataset_name_from_config(cfg) == "processed_T1_FA"
+    assert dataset_name_from_config(cfg) == "processed_dense"
     family = run_family_dir(cfg)
-    assert family == tmp_path / "runs" / "processed_T1_FA" / "baseline"
+    assert family == tmp_path / "runs" / "processed_dense" / "baseline"
     assert resolve_run_name(cfg) == "baseline"
 
 
@@ -59,9 +59,9 @@ def test_create_run_dir_writes_config_and_meta(tmp_path):
     cfg = _cfg(tmp_path)
     run_dir = create_run_dir(
         cfg,
-        config_path="config/best_config.yaml",
+        config_path="config/voxdense.yaml",
         seed=42,
-        argv=["train.py", "--config", "config/best_config.yaml"],
+        argv=["train.py", "--config", "config/voxdense.yaml"],
         timestamp="20260902_130304",
     )
     assert run_dir.name == "20260902_130304"
@@ -72,7 +72,7 @@ def test_create_run_dir_writes_config_and_meta(tmp_path):
     snap = yaml.safe_load((run_dir / "config.yaml").read_text())
     assert snap["training"]["run_name"] == "baseline"
     meta = json.loads((run_dir / "meta.json").read_text())
-    assert meta["dataset"] == "processed_T1_FA"
+    assert meta["dataset"] == "processed_dense"
     assert meta["run_name"] == "baseline"
     assert meta["seed"] == 42
 

@@ -1,12 +1,12 @@
-"""Model contracts: dynamic encoder depth, PE grid, secondary channels."""
+"""Model contracts: encoder depth, PE grid, VoxDense and VoxWhisper forwards."""
 from __future__ import annotations
 
 import torch
 
 from voxwhisper.models.attention import PositionalEncoding3D, bottleneck_spatial_size
 from voxwhisper.models.encoder import Encoder
+from voxwhisper.models.vox_dense import VoxDense
 from voxwhisper.models.vox_whisper import VoxWhisper
-from voxwhisper.config import load_config
 
 
 def test_bottleneck_spatial_size_from_patch_and_strides():
@@ -32,14 +32,43 @@ def test_encoder_returns_bottleneck_and_skip_list():
     assert skips[2].shape == (1, 24, 4, 4, 4)
 
 
-def test_from_config_pe_matches_patch_and_strides():
-    cfg = load_config()
-    model = VoxWhisper.from_config(cfg)
+def test_voxdense_from_config_pe_matches_patch_and_strides(tmp_config):
+    tmp_config["data"]["patch"]["size"] = [16, 16, 16]
+    model = VoxDense.from_config(tmp_config)
     expected = bottleneck_spatial_size(
-        cfg["data"]["patch"]["size"], cfg["model"]["encoder"]["strides"]
+        tmp_config["data"]["patch"]["size"], tmp_config["model"]["encoder"]["strides"]
     )
-    pe = model.cross_volume_attention.pos_primary
+    pe = model.prompt_decoder.pos_encoder
     assert (pe.d_size, pe.h_size, pe.w_size) == expected
+
+
+def test_voxdense_has_no_fa_modules(tmp_config):
+    model = VoxDense.from_config(tmp_config)
+    names = {name for name, _ in model.named_children()}
+    assert "encoder" in names
+    assert "secondary_encoder" not in names
+    assert "cross_volume_attention" not in names
+    assert "primary_encoder" not in names
+
+
+def test_voxdense_forward_shape():
+    model = VoxDense(
+        channels=[8, 16],
+        strides=[2],
+        kernel_sizes=[3],
+        paddings=[1],
+        num_resblocks=[1],
+        embed_dim=16,
+        num_heads=2,
+        text_dim=8,
+        pe_size=(8, 8, 8),
+    )
+    n_prompts = 4
+    volume = torch.zeros(1, 1, 16, 16, 16)
+    text = torch.zeros(1, n_prompts, 8)
+    preds = model(volume, text)
+    assert len(preds) == 1
+    assert preds[0].shape == (1, n_prompts, 16, 16, 16)
 
 
 def test_secondary_encoder_can_use_different_input_channels():
@@ -68,7 +97,6 @@ def test_secondary_encoder_can_use_different_input_channels():
 
 
 def test_voxwhisper_forward_shape():
-    cfg = load_config()
     model = VoxWhisper(
         channels=[8, 16],
         strides=[2],
