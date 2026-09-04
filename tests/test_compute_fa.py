@@ -22,7 +22,7 @@ import nibabel as nib
 import numpy as np
 import pytest
 
-from preprocess.compute_fa import (
+from voxwhisper.data.preprocess.fa import (
     FA_OUTPUT_FILENAME,
     _diffusion_dir,
     _required_diffusion_files,

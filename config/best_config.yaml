@@ -1,0 +1,123 @@
+# =============================================================================
+# best_config.yaml — VoxWhisper production recipe
+#
+# This is the single YAML knob file for training.  Edit values here between
+# runs; no Python changes needed.
+#
+# Recipe summary
+# --------------
+#   Architecture : Large encoder  [32, 64, 128, 256]  embed_dim 256
+#   Learning rate: 1e-4  (AdamW, 10-epoch linear warm-up + cosine anneal)
+#   Loss         : Dice + 0.5 × BCE  (no pos-weight, no accumulation)
+#   Batch        : 2  |  Patches/subject (train): 2  (val): 4
+#   Patch size   : 128³
+#   Modalities   : T1 (primary) + FA (secondary), z-score normalisation
+# =============================================================================
+
+# ── Data ─────────────────────────────────────────────────────────────────────
+
+data:
+  paths:
+    raw:       data/raw
+    processed: data/processed_T1_FA
+    cache:     cache
+    runs:      runs
+
+  volumes:
+    t1:
+      filename: T1w_acpc_dc_restore_1.25.nii.gz
+    fa:
+      filename: dti_FA.nii.gz
+
+  masks:
+    source:     tract_masks_1.25
+    structures: config/structures.json
+
+  patch:
+    size:                    [128, 128, 128]
+    positive_ratio:          0.5
+    train_patches_per_subject: 2
+    val_patches_per_subject:   4
+
+# ── Pre-processing ────────────────────────────────────────────────────────────
+
+preprocessing:
+  zscore_nonzero_only: true
+
+# ── Text encoder (frozen) ─────────────────────────────────────────────────────
+
+text_encoder:
+  model_name: microsoft/BiomedNLP-PubMedBERT-base-uncased-abstract-fulltext
+  cache_file: prompts_tracts.pt
+
+# ── Model architecture ────────────────────────────────────────────────────────
+
+model:
+  input_channels: 1
+  text_dim:   768
+  embed_dim:  256
+  num_heads:  4
+
+  encoder:
+    channels:      [32, 64, 128, 256]
+    strides:       [2, 2, 2]
+    kernel_sizes:  [3, 3, 3]
+    paddings:      [1, 1, 1]
+    num_resblocks: [1, 1, 1]
+
+# ── Training ──────────────────────────────────────────────────────────────────
+
+training:
+  run_name: best_config
+  seed:     42
+
+  batch_size:      2
+  epochs:         150
+  learning_rate:  0.0001
+  warmup_epochs:   10
+
+  bce_weight:     0.5
+  deep_supervision_weights: [0.1, 0.3, 0.6]
+
+  checkpoint:
+    monitor: dice
+    keep:    3
+    every:   10
+
+  dataloader:
+    shuffle:      true
+    drop_last:    true
+    num_workers:  8
+    pin_memory:   true
+
+# ── Data splits ───────────────────────────────────────────────────────────────
+
+splits:
+  train_ratio: 0.8
+  val_ratio:   0.1
+  test_ratio:  0.1
+  seed:        42
+  manifest:    data/splits.json
+
+# ── Experiment tracking ───────────────────────────────────────────────────────
+
+logging:
+  backend: wandb            # options: wandb | none
+  wandb:
+    project: voxwhisper
+    entity:  null           # W&B team slug; null → personal default
+    tags:    []
+
+# ── Inference / evaluation ────────────────────────────────────────────────────
+
+inference:
+  overlap:           0.5
+  mode:              gaussian
+  sigma_scale:       0.125
+  sw_batch_size:     2
+  split:             test
+  output_dir:        data/predictions
+  checkpoint:        null
+  threshold:         0.5
+  save_probabilities: false
+  progress:          true

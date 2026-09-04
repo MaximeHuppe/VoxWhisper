@@ -2,12 +2,8 @@
 from __future__ import annotations
 
 import json
-import sys
-from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-
-from src.training.logger import METRICS_FILENAME, TrainingLogger, _format_class_dice, _jsonify_metric
+from voxwhisper.training.logger import METRICS_FILENAME, TrainingLogger, _format_class_dice, _jsonify_metric
 
 
 def test_jsonify_nested_class_dice():

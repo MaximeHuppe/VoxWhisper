@@ -2,15 +2,11 @@
 from __future__ import annotations
 
 import json
-import sys
-from pathlib import Path
 
 import pytest
 import yaml
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-
-from src.utils.run import (
+from voxwhisper.run import (
     create_or_resume_run,
     create_run_dir,
     dataset_name_from_config,
@@ -25,7 +21,7 @@ from src.utils.run import (
 )
 
 
-def _cfg(tmp_path: Path, *, run_name: str = "baseline", processed: str = "processed_T1_FA") -> dict:
+def _cfg(tmp_path, *, run_name: str = "baseline", processed: str = "processed_T1_FA") -> dict:
     return {
         "data": {
             "paths": {
@@ -33,7 +29,6 @@ def _cfg(tmp_path: Path, *, run_name: str = "baseline", processed: str = "proces
                 "cache": str(tmp_path / "cache"),
                 "runs": str(tmp_path / "runs"),
             },
-            "modalities": {"primary": "t1", "secondary": "fa"},
         },
         "training": {"run_name": run_name, "seed": 42},
     }
@@ -57,16 +52,16 @@ def test_dataset_and_family_from_config(tmp_path):
     assert dataset_name_from_config(cfg) == "processed_T1_FA"
     family = run_family_dir(cfg)
     assert family == tmp_path / "runs" / "processed_T1_FA" / "baseline"
-    assert resolve_run_name(cfg, name_override="ablation") == "ablation"
+    assert resolve_run_name(cfg) == "baseline"
 
 
 def test_create_run_dir_writes_config_and_meta(tmp_path):
     cfg = _cfg(tmp_path)
     run_dir = create_run_dir(
         cfg,
-        config_path="config/tracts.yaml",
+        config_path="config/best_config.yaml",
         seed=42,
-        argv=["train.py", "--config", "config/tracts.yaml"],
+        argv=["train.py", "--config", "config/best_config.yaml"],
         timestamp="20260902_130304",
     )
     assert run_dir.name == "20260902_130304"
@@ -103,16 +98,6 @@ def test_resume_without_prior_creates_new(tmp_path, capsys):
     assert "no prior run" in out.lower() or "starting a new run" in out.lower()
 
 
-def test_legacy_flat_family_resume(tmp_path):
-    """Pre-layout folders with latest.pt at the family root still resume."""
-    cfg = _cfg(tmp_path)
-    family = run_family_dir(cfg)
-    family.mkdir(parents=True)
-    (family / "vox_whisper_latest.pt").write_bytes(b"legacy")
-    resumed = create_or_resume_run(cfg, resume=True)
-    assert resumed == family
-
-
 def test_find_checkpoint_prefers_best(tmp_path):
     cfg = _cfg(tmp_path)
     run_dir = create_run_dir(cfg, timestamp="20260902_150000")
@@ -131,13 +116,6 @@ def test_find_checkpoint_prefers_best(tmp_path):
     assert via_dir.name == "vox_whisper_best.pt"
 
 
-def test_name_override_changes_family(tmp_path):
-    cfg = _cfg(tmp_path, run_name="baseline")
-    run_dir = create_run_dir(cfg, name_override="high_bce", timestamp="20260902_160000")
-    assert "high_bce" in run_dir.parts
-    assert "baseline" not in run_dir.parts
-
-
 def test_predictions_dir(tmp_path):
     cfg = _cfg(tmp_path)
     run_dir = create_run_dir(cfg, timestamp="20260902_170000")
@@ -151,7 +129,6 @@ def test_resolve_run_dir_for_eval_returns_latest(tmp_path):
     newer = create_run_dir(cfg, timestamp="20260902_120000")
     (older / "vox_whisper_latest.pt").write_bytes(b"old")
     (newer / "vox_whisper_latest.pt").write_bytes(b"new")
-
     assert resolve_run_dir_for_eval(cfg) == newer
 
 

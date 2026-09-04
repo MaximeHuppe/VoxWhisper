@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import copy
-import sys
 import tempfile
 from contextlib import contextmanager
 from pathlib import Path
@@ -11,13 +10,42 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from voxwhisper.data.dataset import VoxWhisperDataset
+from voxwhisper.models.vox_whisper import VoxWhisper
+from voxwhisper.config import load_config, resolve_path
+from voxwhisper.training.loss import DiceBCELoss
 
-from preprocess.generate_mock_dataset import make_mock_cohort
-from src.data.dataset import VoxWhisperDataset
-from src.models.vox_whisper import VoxWhisper
-from src.utils.config import load_config, resolve_path
-from src.training.metrics import DiceBCELoss
+
+def _make_mock_cohort(cfg: dict, num_subjects: int = 4) -> None:
+    """Create minimal synthetic processed data (no raw diffusion needed)."""
+    import numpy as np
+    import nibabel as nib
+    from voxwhisper.data.nifti_io import volume_path, mask_path, subject_processed_dir
+    from voxwhisper.config import ensure_dir
+
+    processed_dir = Path(cfg["data"]["paths"]["processed"])
+    vol_shape = tuple(cfg["data"].get("mock_volume_shape", [64, 64, 64]))
+    n_prompts = len(cfg["data"]["prompts"])
+
+    for i in range(num_subjects):
+        subject_id = f"sub{i:04d}"
+        subj_dir = subject_processed_dir(processed_dir, subject_id)
+        ensure_dir(subj_dir)
+        affine = np.eye(4)
+
+        for modality in ("t1", "fa"):
+            vol = np.random.randn(*vol_shape).astype(np.float32)
+            nib.save(nib.Nifti1Image(vol, affine), str(volume_path(processed_dir, subject_id, modality)))
+
+        label = np.zeros(vol_shape, dtype=np.uint8)
+        center = tuple(s // 2 for s in vol_shape)
+        r = vol_shape[0] // 8
+        label[
+            center[0] - r : center[0] + r,
+            center[1] - r : center[1] + r,
+            center[2] - r : center[2] + r,
+        ] = 1
+        nib.save(nib.Nifti1Image(label, affine), str(mask_path(processed_dir, subject_id)))
 
 
 def _make_test_config(tmp_path: Path) -> dict:
@@ -28,7 +56,6 @@ def _make_test_config(tmp_path: Path) -> dict:
     cfg["data"]["mock_volume_shape"] = [64, 64, 64]
     cfg["data"]["patch"]["size"] = [32, 32, 32]
     cfg["data"]["patch"]["train_patches_per_subject"] = 1
-    cfg["splits"]["enabled"] = False
     cfg["training"]["batch_size"] = 2
     cfg["training"]["dataloader"]["num_workers"] = 0
     return cfg
@@ -36,7 +63,7 @@ def _make_test_config(tmp_path: Path) -> dict:
 
 def _bootstrap_fixture_data(tmp_path: Path) -> dict:
     cfg = _make_test_config(tmp_path)
-    make_mock_cohort(cfg, num_subjects=4)
+    _make_mock_cohort(cfg, num_subjects=4)
 
     cache_dir = resolve_path(cfg, "data.paths.cache")
     cache_dir.mkdir(parents=True, exist_ok=True)

@@ -11,9 +11,13 @@ trained_models/
 wandb/
 
 # Exclude pre-computed text embeddings and trained model checkpoints
+cache/*.pt
 cache/*/*.pt
 cache/*.npy
 cache/*.npz
+
+# Exclude generated split manifests (recreated from data automatically)
+data/splits.json
 runs/
 
 # ==========================================
