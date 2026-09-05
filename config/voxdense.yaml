@@ -106,7 +106,7 @@ splits:
 logging:
   backend: wandb
   wandb:
-    project: voxwhisper
+    project: voxdense
     entity:  null
     tags:    [voxdense, phase1]
 
