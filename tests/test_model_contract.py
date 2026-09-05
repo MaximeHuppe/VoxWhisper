@@ -71,6 +71,21 @@ def test_voxdense_forward_shape():
     assert preds[0].shape == (1, n_prompts, 16, 16, 16)
 
 
+def test_stage_vl_fusion_logits_invariant_to_extra_prompts():
+    """Shared mean-pool gating made logits depend on N_T; per-prompt gate must not."""
+    from voxwhisper.models.decoder import StageVLFusionBlock
+
+    block = StageVLFusionBlock(visual_channels=8, query_dim=8)
+    torch.manual_seed(0)
+    visual = torch.randn(1, 8, 2, 2, 2)
+    q_shared = torch.randn(1, 2, 8)
+    q_extra = torch.cat([q_shared, torch.randn(1, 3, 8)], dim=1)
+
+    _, logits_small = block(visual, q_shared)
+    _, logits_large = block(visual, q_extra)
+    torch.testing.assert_close(logits_small, logits_large[:, :2], atol=1e-5, rtol=1e-5)
+
+
 def test_secondary_encoder_can_use_different_input_channels():
     model = VoxWhisper(
         input_channels=1,

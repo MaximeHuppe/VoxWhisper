@@ -31,12 +31,13 @@ class StageVLFusionBlock(nn.Module):
     Given visual feature maps and the language-aligned query tokens produced by
     ``PromptDecoder``, this block:
 
-    1. **Channel gating** – projects the mean query vector to the visual channel
-       dimension and applies a sigmoid gate, suppressing channels not relevant
-       to the active prompt set.
+    1. **Per-prompt channel gating** – each query is projected to the visual
+       channel dimension and applies its own sigmoid gate.  A previous mean-pool
+       over prompts made the shared gate depend on ``N_T`` and broke train/val
+       when training used ``prompts_per_crop`` but validation used all prompts.
     2. **Mask projection** – computes per-voxel, per-prompt affinities via a
-       scaled dot-product between the (per-prompt) queries and every spatial
-       voxel, producing logit maps of shape ``[B, N_T, D, H, W]``.
+       scaled dot-product between the gated (per-prompt) queries and every
+       spatial voxel, producing logit maps of shape ``[B, N_T, D, H, W]``.
 
     The scaling factor ``1 / sqrt(visual_channels)`` prevents the dot products
     from growing large when ``visual_channels`` is large, avoiding sigmoid
@@ -75,24 +76,22 @@ class StageVLFusionBlock(nn.Module):
 
         Returns
         -------
-        modulated_vis  : [B, C_vis, D, H, W]  – channel-gated features
+        modulated_vis  : [B, C_vis, D, H, W]  – unchanged visual features
         mask_logits    : [B, N_T, D, H, W]    – per-prompt spatial logits
         """
         B, C_vis, D, H, W = visual_features.shape
 
         # Project each query token to the visual channel space: [B, N_T, C_vis]
         projected_queries = self.query_adapter(aligned_queries)
+        # Per-prompt gate — independent of how many prompts are in the batch.
+        gated_queries = projected_queries * torch.sigmoid(projected_queries)
 
-        # Mean-pool over prompts → global gating vector [B, C_vis] → [B, C_vis, 1, 1, 1]
-        gate = torch.sigmoid(projected_queries.mean(dim=1)).view(B, C_vis, 1, 1, 1)
-        modulated_vis = visual_features * gate
-
-        # Scaled dot-product: queries × voxels → [B, N_T, D*H*W] → [B, N_T, D, H, W]
-        flat_vis = modulated_vis.view(B, C_vis, D * H * W)
-        mask_logits = (projected_queries @ flat_vis) * self.scale
+        # Scaled dot-product: gated queries × voxels → [B, N_T, D*H*W] → [B, N_T, D, H, W]
+        flat_vis = visual_features.view(B, C_vis, D * H * W)
+        mask_logits = (gated_queries @ flat_vis) * self.scale
         mask_logits = mask_logits.view(B, -1, D, H, W)
 
-        return modulated_vis, mask_logits
+        return visual_features, mask_logits
 
 
 class Decoder(nn.Module):

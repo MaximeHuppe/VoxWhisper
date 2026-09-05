@@ -46,6 +46,7 @@ def channel_dice_from_logits(
     target: torch.Tensor,
     threshold: float = 0.5,
     eps: float = 1e-5,
+    ignore_empty_targets: bool = False,
 ) -> List[float]:
     """Per-channel Dice after sigmoid thresholding (multi-label convention).
 
@@ -53,6 +54,9 @@ def channel_dice_from_logits(
     ----------
     logits, target : ``[B, N_T, D, H, W]`` or ``[N_T, D, H, W]``
     threshold      : sigmoid activation threshold (default 0.5).
+    ignore_empty_targets : if True, channels with no GT voxels return ``nan``
+        so callers can exclude them from the mean (avoids FP mass on absent
+        structures dragging patch Dice to ~0).
 
     Returns
     -------
@@ -67,8 +71,12 @@ def channel_dice_from_logits(
     for class_id in range(logits.shape[1]):
         pred_c = pred[:, class_id]
         gt_c = gt[:, class_id]
+        gt_sum = gt_c.sum()
+        if ignore_empty_targets and gt_sum == 0:
+            scores.append(float("nan"))
+            continue
         intersection = (pred_c & gt_c).sum().float()
-        denom = pred_c.sum() + gt_c.sum()
+        denom = pred_c.sum() + gt_sum
         scores.append(1.0 if denom == 0 else float((2.0 * intersection + eps) / (denom + eps)))
     return scores
 
@@ -81,11 +89,15 @@ def foreground_channel_dice(
 ) -> float:
     """Mean Dice over non-background channels (channel 0 excluded).
 
-    Returns 1.0 when there are no foreground channels (degenerate case).
+    Empty-target channels are skipped.  Returns 1.0 when there are no
+    present foreground channels (degenerate case).
     """
-    scores = channel_dice_from_logits(logits, target, threshold=threshold, eps=eps)
+    scores = channel_dice_from_logits(
+        logits, target, threshold=threshold, eps=eps, ignore_empty_targets=True
+    )
     foreground = scores[1:] if len(scores) > 1 else scores
-    return sum(foreground) / len(foreground) if foreground else 1.0
+    present = [s for s in foreground if s == s]  # drop NaN
+    return sum(present) / len(present) if present else 1.0
 
 
 def named_foreground_dice(
@@ -95,6 +107,7 @@ def named_foreground_dice(
     """Map per-channel Dice to foreground names (channel 0 dropped).
 
     When ``class_names`` is omitted, keys are ``c1``, ``c2``, …
+    NaN scores (absent GT) are kept so callers can filter them.
     """
     foreground = list(scores[1:] if len(scores) > 1 else scores)
     if class_names is None:

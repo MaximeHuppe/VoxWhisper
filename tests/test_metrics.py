@@ -54,11 +54,14 @@ def test_dice_bce_from_config():
     loss = DiceBCELoss.from_config({"training": {"bce_weight": 0.5}})
     assert loss.bce_weight == pytest.approx(0.5)
     assert loss.exclude_background is True
+    assert loss.ignore_empty_targets is True
     default = DiceBCELoss.from_config({})
     assert default.bce_weight == pytest.approx(1.0)
     assert default.exclude_background is True
     included = DiceBCELoss.from_config({"training": {"exclude_background": False}})
     assert included.exclude_background is False
+    keep_empty = DiceBCELoss.from_config({"training": {"ignore_empty_targets": False}})
+    assert keep_empty.ignore_empty_targets is False
 
 
 def test_dice_bce_exclude_background_skips_channel_zero():
@@ -83,6 +86,22 @@ def test_dice_bce_exclude_background_skips_channel_zero():
     assert included(logits, target).item() < excluded(logits, target).item()
 
 
+def test_dice_ignores_empty_target_channels():
+    """Absent FG channels must not drag Dice via false-positive mass."""
+    logits = torch.full((1, 3, 1, 1, 4), -10.0)
+    target = torch.zeros(1, 3, 1, 1, 4)
+    # Channel 1 present and perfect.
+    target[:, 1] = 1.0
+    logits[:, 1] = 10.0
+    # Channel 2 empty GT but strong FP predictions.
+    logits[:, 2] = 10.0
+
+    ignore = DiceBCELoss(eps=1e-5, bce_weight=0.0, ignore_empty_targets=True)
+    keep = DiceBCELoss(eps=1e-5, bce_weight=0.0, ignore_empty_targets=False)
+    assert ignore(logits, target).item() == pytest.approx(0.0, abs=1e-3)
+    assert keep(logits, target).item() > ignore(logits, target).item()
+
+
 def test_named_foreground_dice_drops_background():
     scores = [0.99, 0.8, 0.0, 0.4]
     named = named_foreground_dice(scores, ["background", "left_thalamus", "right_thalamus", "brainstem"])
@@ -100,3 +119,6 @@ def test_load_config_injects_structure_names():
     assert len(names) == 33
     assert len(names) == len(cfg["data"]["prompts"])
     assert cfg["model"]["name"] == "VoxDense"
+    assert cfg["training"].get("ignore_empty_targets", True) is True
+    assert cfg["data"]["patch"]["prompts_per_crop"] == 16
+    assert cfg["training"]["learning_rate"] == pytest.approx(5e-5)
