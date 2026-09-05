@@ -44,6 +44,7 @@ The checkpoint stores `encoder_state_dict` so Phase 2 can reload the T1 encoder 
 | `training.batch_size` | Physical batch size |
 | `training.bce_weight` | BCE term multiplier (`loss = Dice + bce_weight × BCE`) |
 | `training.exclude_background` | Soft Dice skips channel 0 (must be background; default true) |
+| `training.ignore_empty_targets` | Soft Dice skips empty-target channels (default true) |
 | `training.deep_supervision_weights` | Per-scale weights `[coarse, mid, fine]` |
 | `training.seed` | Global RNG seed |
 | `training.checkpoint.monitor` | `dice` (default) or `loss` |

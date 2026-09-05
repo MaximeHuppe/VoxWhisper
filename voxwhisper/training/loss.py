@@ -5,7 +5,9 @@ Design notes
 ``DiceBCELoss`` combines:
 * **BCE** — ``binary_cross_entropy_with_logits`` over *all* channels.
 * **Dice** — mean soft Dice over *foreground channels only* (indices 1…N_T−1),
-  when ``exclude_background=True`` (default).
+  when ``exclude_background=True`` (default).  Channels with an empty target
+  (no positive voxels in the batch for that channel) are skipped so absent
+  structures cannot dominate the Dice term via false-positive mass.
 
 **Contract:** channel 0 must be the background class.  ``VoxDenseDataset``
 always prepends background when sampling ``prompts_per_crop`` so training
@@ -42,6 +44,9 @@ class DiceBCELoss(nn.Module):
     exclude_background : bool
         If True (default), soft Dice ignores channel 0.  Callers must ensure
         channel 0 is background — never a sampled foreground structure.
+    ignore_empty_targets : bool
+        If True (default), soft Dice skips channels with zero target mass so
+        absent structures do not dominate the mean via false-positive logits.
     """
 
     def __init__(
@@ -49,19 +54,41 @@ class DiceBCELoss(nn.Module):
         eps: float = 1e-5,
         bce_weight: float = 1.0,
         exclude_background: bool = True,
+        ignore_empty_targets: bool = True,
     ) -> None:
         super().__init__()
         self.eps = eps
         self.bce_weight = bce_weight
         self.exclude_background = exclude_background
+        self.ignore_empty_targets = ignore_empty_targets
 
     @classmethod
     def from_config(cls, config: dict) -> "DiceBCELoss":
-        """Construct from ``training.bce_weight`` in the loaded YAML config."""
+        """Construct from ``training.*`` loss knobs in the loaded YAML config."""
         train_cfg = config.get("training", {})
         bce_weight = float(train_cfg.get("bce_weight", 1.0))
         exclude_background = bool(train_cfg.get("exclude_background", True))
-        return cls(bce_weight=bce_weight, exclude_background=exclude_background)
+        ignore_empty_targets = bool(train_cfg.get("ignore_empty_targets", True))
+        return cls(
+            bce_weight=bce_weight,
+            exclude_background=exclude_background,
+            ignore_empty_targets=ignore_empty_targets,
+        )
+
+    def _dice_loss(self, pred_probs: torch.Tensor, target_mask: torch.Tensor) -> torch.Tensor:
+        """Soft Dice over selected channels; optionally drop empty targets."""
+        pred_flat = _channel_flat(pred_probs)
+        tgt_flat = _channel_flat(target_mask)
+        target_mass = tgt_flat.sum(dim=1)
+        intersection = (pred_flat * tgt_flat).sum(dim=1)
+        union = pred_flat.sum(dim=1) + target_mass
+        channel_dice = (2.0 * intersection + self.eps) / (union + self.eps)
+        if self.ignore_empty_targets:
+            present = target_mass > 0
+            if bool(present.any()):
+                return (1.0 - channel_dice[present]).mean()
+            return pred_probs.new_zeros(())
+        return (1.0 - channel_dice).mean()
 
     def forward(self, pred_logits: torch.Tensor, target_mask: torch.Tensor) -> torch.Tensor:
         """
@@ -83,20 +110,9 @@ class DiceBCELoss(nn.Module):
         pred_probs = torch.sigmoid(pred_logits)
 
         if self.exclude_background and n_channels > 1:
-            fg_pred = _channel_flat(pred_probs[:, 1:])
-            fg_tgt = _channel_flat(target_mask[:, 1:])
-            intersection = (fg_pred * fg_tgt).sum(dim=1)
-            union = fg_pred.sum(dim=1) + fg_tgt.sum(dim=1)
-            channel_dice = (2.0 * intersection + self.eps) / (union + self.eps)
-            dice_loss = (1.0 - channel_dice).mean()
+            dice_loss = self._dice_loss(pred_probs[:, 1:], target_mask[:, 1:])
         else:
-            # Single-channel or explicit "Dice over every channel".
-            pred_flat = _channel_flat(pred_probs)
-            tgt_flat = _channel_flat(target_mask)
-            intersection = (pred_flat * tgt_flat).sum(dim=1)
-            union = pred_flat.sum(dim=1) + tgt_flat.sum(dim=1)
-            channel_dice = (2.0 * intersection + self.eps) / (union + self.eps)
-            dice_loss = (1.0 - channel_dice).mean()
+            dice_loss = self._dice_loss(pred_probs, target_mask)
 
         return dice_loss + self.bce_weight * bce_loss
 

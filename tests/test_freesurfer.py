@@ -64,6 +64,27 @@ def test_sample_prompt_labels_never_returns_background():
     assert set(chosen).issubset({1, 2})
 
 
+def test_class_balanced_positive_center_hits_small_label():
+    """Volume-weighted FG sampling almost never hits a 1-voxel structure; balanced does."""
+    from voxwhisper.data.dataset import VoxDenseDataset
+
+    labels = np.zeros((16, 16, 16), dtype=np.int16)
+    labels[0:12, 0:12, 0:12] = 1  # huge class
+    labels[15, 15, 15] = 2        # single voxel
+
+    class _Shim:
+        positive_labels = [1, 2]
+
+    hits = 0
+    rng = np.random.default_rng(0)
+    for _ in range(200):
+        center = VoxDenseDataset._sample_positive_center(_Shim(), labels, rng)
+        assert center is not None
+        if labels[center] == 2:
+            hits += 1
+    assert hits > 40  # ~50% expected under uniform label sampling
+
+
 def test_process_named_masks_stacks_on_t1(tmp_whisper_config, tmp_path):
     import nibabel as nib
     from voxwhisper.data.nifti_io import mask_path

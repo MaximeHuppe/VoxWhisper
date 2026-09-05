@@ -187,6 +187,23 @@ class VoxDenseDataset(Dataset):
     def _positive_voxels(self, labels: np.ndarray) -> np.ndarray:
         return np.argwhere(self._positive_mask(labels))
 
+    def _sample_positive_center(self, labels: np.ndarray, rng: np.random.Generator) -> Optional[Center]:
+        """Sample a positive crop center, balancing across present structures.
+
+        Uniformly picks a label among those present in the volume, then a voxel
+        of that label.  Volume-weighted ``argwhere`` over all FG labels would
+        almost always land in cortex / white matter and starve small structures.
+        """
+        present = [lab for lab in self.positive_labels if np.any(labels == lab)]
+        if not present:
+            return None
+        lab = int(present[int(rng.integers(0, len(present)))])
+        voxels = np.argwhere(labels == lab)
+        if len(voxels) == 0:
+            return None
+        z, y, x = voxels[int(rng.integers(0, len(voxels)))]
+        return (int(z), int(y), int(x))
+
     def _foreground_centroid(self, voxels: np.ndarray) -> Optional[Center]:
         if len(voxels) == 0:
             return None
@@ -221,12 +238,12 @@ class VoxDenseDataset(Dataset):
         if n_pos > 0 and len(voxels) > 0:
             centers.append(self._foreground_centroid(voxels))  # type: ignore[arg-type]
             remaining = n_pos - 1
-            if remaining > 0:
-                replace = remaining > len(voxels)
-                chosen = rng.choice(len(voxels), size=remaining, replace=replace)
-                for i in np.atleast_1d(chosen):
-                    z, y, x = voxels[int(i)]
-                    centers.append((int(z), int(y), int(x)))
+            for _ in range(remaining):
+                center = self._sample_positive_center(labels, rng)
+                if center is None:
+                    z, y, x = voxels[int(rng.integers(0, len(voxels)))]
+                    center = (int(z), int(y), int(x))
+                centers.append(center)
         else:
             for _ in range(n_pos):
                 centers.append(random_valid_center(labels.shape, self.patch_size, rng))
@@ -238,11 +255,9 @@ class VoxDenseDataset(Dataset):
     def _sample_training_center(self, labels: np.ndarray) -> Center:
         rng = self._get_rng()
         if rng.random() < self.positive_ratio:
-            positive_voxels = self._positive_voxels(labels)
-            if len(positive_voxels) > 0:
-                idx = int(rng.integers(0, len(positive_voxels)))
-                z, y, x = positive_voxels[idx]
-                return (int(z), int(y), int(x))
+            center = self._sample_positive_center(labels, rng)
+            if center is not None:
+                return center
         return random_valid_center(labels.shape, self.patch_size, rng)
 
     def _channels_for_patch(
@@ -473,6 +488,18 @@ class VoxWhisperDataset(Dataset):
         """Return coordinates of all foreground voxels as shape (N, 3)."""
         return np.argwhere(self._positive_mask(labels))
 
+    def _sample_positive_center(self, labels: np.ndarray, rng: np.random.Generator) -> Optional[Center]:
+        """Uniform over present labels, then a voxel of that label."""
+        present = [lab for lab in self.positive_labels if np.any(labels == lab)]
+        if not present:
+            return None
+        lab = int(present[int(rng.integers(0, len(present)))])
+        voxels = np.argwhere(labels == lab)
+        if len(voxels) == 0:
+            return None
+        z, y, x = voxels[int(rng.integers(0, len(voxels)))]
+        return (int(z), int(y), int(x))
+
     def _foreground_centroid(self, voxels: np.ndarray) -> Optional[Center]:
         if len(voxels) == 0:
             return None
@@ -503,8 +530,8 @@ class VoxWhisperDataset(Dataset):
         """Sample ``val_patches_per_subject`` fixed centers with the positive ratio.
 
         The first positive center is always the foreground centroid (most
-        representative), remaining positive centers are sampled from foreground
-        voxels, and negative centers are sampled uniformly.
+        representative), remaining positive centers are class-balanced, and
+        negative centers are sampled uniformly.
         """
         n_patches = self.val_patches_per_subject
         n_pos = self._n_positive_patches(n_patches)
@@ -515,12 +542,12 @@ class VoxWhisperDataset(Dataset):
         if n_pos > 0 and len(voxels) > 0:
             centers.append(self._foreground_centroid(voxels))  # type: ignore[arg-type]
             remaining = n_pos - 1
-            if remaining > 0:
-                replace = remaining > len(voxels)
-                chosen = rng.choice(len(voxels), size=remaining, replace=replace)
-                for i in np.atleast_1d(chosen):
-                    z, y, x = voxels[int(i)]
-                    centers.append((int(z), int(y), int(x)))
+            for _ in range(remaining):
+                center = self._sample_positive_center(labels, rng)
+                if center is None:
+                    z, y, x = voxels[int(rng.integers(0, len(voxels)))]
+                    center = (int(z), int(y), int(x))
+                centers.append(center)
         else:
             for _ in range(n_pos):
                 centers.append(random_valid_center(labels.shape, self.patch_size, rng))
@@ -533,11 +560,9 @@ class VoxWhisperDataset(Dataset):
         """Sample one patch center with the configured positive/negative ratio."""
         rng = self._get_rng()
         if rng.random() < self.positive_ratio:
-            positive_voxels = self._positive_voxels(labels)
-            if len(positive_voxels) > 0:
-                idx = int(rng.integers(0, len(positive_voxels)))
-                z, y, x = positive_voxels[idx]
-                return (int(z), int(y), int(x))
+            center = self._sample_positive_center(labels, rng)
+            if center is not None:
+                return center
         return random_valid_center(labels.shape, self.patch_size, rng)
 
     # ------------------------------------------------------------------

@@ -45,9 +45,13 @@ _GRAD_CLIP_NORM = 1.0
 # ---------------------------------------------------------------------------
 
 def _mean_channel_scores(score_lists: list[list[float]]) -> list[float]:
-    n = len(score_lists)
+    """Nan-aware mean per channel (absent-GT patches contribute nothing)."""
     n_ch = len(score_lists[0])
-    return [sum(row[i] for row in score_lists) / n for i in range(n_ch)]
+    means: list[float] = []
+    for i in range(n_ch):
+        vals = [row[i] for row in score_lists if row[i] == row[i]]
+        means.append(sum(vals) / len(vals) if vals else float("nan"))
+    return means
 
 
 @torch.no_grad()
@@ -62,8 +66,9 @@ def evaluate_patches(
 ) -> dict:
     """Patch-level validation.
 
-    Returns ``val_loss``, ``dice_patch`` (mean foreground), and
-    ``dice_patch_classes`` (per-tract dict).
+    Returns ``val_loss``, ``dice_patch`` (mean over *present* foreground), and
+    ``dice_patch_classes`` (per-tract dict; absent structures omitted from the
+    mean and reported as 0.0 when never seen in any val patch).
     """
     model.eval()
     total_loss = 0.0
@@ -87,7 +92,12 @@ def evaluate_patches(
         logits = predictions[-1]
         for b in range(logits.shape[0]):
             per_patch_scores.append(
-                channel_dice_from_logits(logits[b], gt_mask[b], threshold=threshold)
+                channel_dice_from_logits(
+                    logits[b],
+                    gt_mask[b],
+                    threshold=threshold,
+                    ignore_empty_targets=True,
+                )
             )
 
     if not per_patch_scores:
@@ -95,10 +105,14 @@ def evaluate_patches(
 
     mean_scores = _mean_channel_scores(per_patch_scores)
     foreground = mean_scores[1:] if len(mean_scores) > 1 else mean_scores
+    present = [s for s in foreground if s == s]
+    named = named_foreground_dice(mean_scores, class_names)
+    # Replace NaN with 0.0 for JSON / W&B (structure never present in val crops).
+    named = {k: (0.0 if v != v else v) for k, v in named.items()}
     return {
         "val_loss": total_loss / n_batches if n_batches > 0 else 0.0,
-        "dice_patch": sum(foreground) / len(foreground) if foreground else 1.0,
-        "dice_patch_classes": named_foreground_dice(mean_scores, class_names),
+        "dice_patch": sum(present) / len(present) if present else 1.0,
+        "dice_patch_classes": named,
     }
 
 

@@ -32,10 +32,12 @@ data:
 
   patch:
     size:                      [128, 128, 128]
-    positive_ratio:            0.7
+    positive_ratio:            0.8
     train_patches_per_subject: 8
     val_patches_per_subject:   4
-    prompts_per_crop:          8
+    # Keep prompt sampling for VRAM, but StageVLFusionBlock is now N_T-invariant.
+    # Prefer present labels; raise k so small structures are seen more often.
+    prompts_per_crop:          16
 
 # ── Pre-processing ────────────────────────────────────────────────────────────
 
@@ -73,11 +75,14 @@ training:
 
   batch_size:      2
   epochs:         150
-  learning_rate:  0.0001
-  warmup_epochs:    5
+  # Peak LR was too aggressive with the old mean-pool gate: val_loss blew up
+  # exactly when warm-up reached 1e-4 (epoch 5 on run 20260904_161107).
+  learning_rate:  0.00005
+  warmup_epochs:   10
 
   bce_weight:     0.5
   exclude_background: true
+  ignore_empty_targets: true
   deep_supervision_weights: [0.1, 0.3, 0.6]
 
   checkpoint:
