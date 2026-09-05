@@ -1,15 +1,18 @@
-"""Sliding-window inference: Gaussian blending back to the native volume grid."""
+"""Sliding-window inference tests."""
 from __future__ import annotations
 
-import sys
 from pathlib import Path
+
 import torch
 import torch.nn as nn
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-
-from src.infer import SlidingWindowPredictor, predict_full_volume
-from src.training.metrics import per_class_dice
+from voxwhisper.infer import (
+    SlidingWindowPredictor,
+    SlidingWindowPredictorDense,
+    predict_dense_volume,
+    predict_full_volume,
+)
+from voxwhisper.training.metrics import per_class_dice
 
 
 class _IdentityNet(nn.Module):
@@ -17,7 +20,6 @@ class _IdentityNet(nn.Module):
 
     def forward(self, primary, secondary, text):
         n_prompts = text.shape[1]
-        # Clone so the stitch buffer does not alias the input crop.
         full = primary.expand(-1, n_prompts, -1, -1, -1).clone()
         return [full, full, full]
 
@@ -32,6 +34,37 @@ class _RecordingNet(nn.Module):
         n_prompts = text.shape[1]
         full = (primary + secondary).expand(-1, n_prompts, -1, -1, -1).clone()
         return [full * 0.25, full * 0.5, full]
+
+
+def test_dense_predictor_returns_fullres():
+    class _DenseNet(nn.Module):
+        def forward(self, volume, text):
+            n_prompts = text.shape[1]
+            full = volume.expand(-1, n_prompts, -1, -1, -1).clone()
+            return [full, full]
+
+    model = _DenseNet()
+    text = torch.zeros(2, 8)
+    predictor = SlidingWindowPredictorDense(model, text)
+    inputs = torch.randn(2, 1, 16, 16, 16)
+    out = predictor(inputs)
+    assert out.shape == (2, 2, 16, 16, 16)
+
+
+def test_predict_dense_volume_matches_native_size():
+    class _DenseNet(nn.Module):
+        def forward(self, volume, text):
+            n_prompts = text.shape[1]
+            return [volume.expand(-1, n_prompts, -1, -1, -1).clone()]
+
+    model = _DenseNet()
+    text = torch.ones(1, 4)
+    volume = torch.randn(1, 1, 40, 37, 41)
+    logits = predict_dense_volume(
+        model, volume, text, roi_size=(32, 32, 32), sw_batch_size=2, overlap=0.5
+    )
+    assert logits.shape == (1, 1, 40, 37, 41)
+    torch.testing.assert_close(logits, volume, rtol=1e-4, atol=1e-4)
 
 
 def test_predictor_splits_concatenated_channels_and_returns_fullres():
@@ -58,16 +91,9 @@ def test_sliding_window_output_matches_native_volume_size():
     secondary = torch.randn(1, 1, 40, 37, 41)
 
     logits = predict_full_volume(
-        model,
-        primary,
-        secondary,
-        text,
-        roi_size=(32, 32, 32),
-        sw_batch_size=2,
-        overlap=0.5,
-        mode="gaussian",
+        model, primary, secondary, text,
+        roi_size=(32, 32, 32), sw_batch_size=2, overlap=0.5, mode="gaussian",
     )
-
     assert logits.shape == (1, 2, 40, 37, 41)
 
 
@@ -79,16 +105,9 @@ def test_gaussian_blend_reconstructs_agreed_voxels():
     secondary = torch.zeros_like(primary)
 
     logits = predict_full_volume(
-        model,
-        primary,
-        secondary,
-        text,
-        roi_size=(32, 32, 32),
-        sw_batch_size=1,
-        overlap=0.5,
-        mode="gaussian",
+        model, primary, secondary, text,
+        roi_size=(32, 32, 32), sw_batch_size=1, overlap=0.5, mode="gaussian",
     )
-
     assert logits.shape == (1, 1, 48, 48, 48)
     torch.testing.assert_close(logits, primary, rtol=1e-4, atol=1e-4)
 
@@ -128,27 +147,17 @@ def test_predict_restores_training_flag():
     assert model.training is True
 
 
-def test_checkpoint_epoch_numeric_not_lexicographic():
-    from pathlib import Path
-    from pipeline.evaluate import _checkpoint_epoch
-
-    assert _checkpoint_epoch(Path("vox_whisper_epoch_9.pt")) < _checkpoint_epoch(
-        Path("vox_whisper_epoch_10.pt")
-    )
-
-
 def test_resolve_checkpoint_from_run_layout(tmp_path):
-    from pipeline.evaluate import resolve_checkpoint
-    from src.utils.run import create_run_dir
+    from voxwhisper.util.run import create_run_dir
+    from scripts.evaluate import resolve_checkpoint
 
     cfg = {
         "data": {
             "paths": {
-                "processed": str(tmp_path / "processed_T1_FA"),
+                "processed": str(tmp_path / "processed_dense"),
                 "runs": str(tmp_path / "runs"),
                 "cache": str(tmp_path / "cache"),
             },
-            "modalities": {"primary": "t1", "secondary": "fa"},
         },
         "training": {"run_name": "baseline"},
         "inference": {"checkpoint": None},
@@ -159,4 +168,3 @@ def test_resolve_checkpoint_from_run_layout(tmp_path):
 
     assert resolve_checkpoint(cfg, None).name == "vox_whisper_best.pt"
     assert resolve_checkpoint(cfg, None, run_dir=str(run_dir)).name == "vox_whisper_best.pt"
-

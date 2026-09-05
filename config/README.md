@@ -1,198 +1,124 @@
 # `config/` — experiment configuration
 
-Main file: [`tracts.yaml`](tracts.yaml). Structure names and clinical phrases: [`structures.json`](structures.json).
+Phase 1 file: [`voxdense.yaml`](voxdense.yaml). Dense structure names: [`structures_dense.json`](structures_dense.json). Phase 2 will use a separate `voxwhisper.yaml` (not in this branch).
 
-Load with `src.utils.config.load_config(path)`. Relative paths are resolved from the repo root. When `data.masks.structures` is set, `load_config` injects:
+Load with `voxwhisper.util.config.load_config(path)`. Defaults to `config/voxdense.yaml`. Relative paths are resolved from the repo root. When `data.masks.structures` is set, `load_config` injects:
 
 - `data.prompts` — ordered prompt strings (including background)
-- `data.structure_names` — ordered structure keys from `structures.json` (including background)
+- `data.structure_names` — ordered structure keys (including background)
 - `data.patch.positive_labels` — foreground label ids used for positive patch sampling
 
-## `structures.json`
+## `structures_dense.json`
 
 Each key is a structure name; value has:
 
 | Field | Meaning |
 |-------|---------|
-| `label` | Integer written into `mask.nii.gz` (0 = background) |
+| `label` | Integer written into `mask.nii.gz` (0 = background, 1–32 = SynthSeg-style tissues) |
 | `prompt` | Text fed to PubMedBERT / used as a segmentation channel |
 
-Order of channels follows ascending `label`. Foreground entries without a matching raw mask file are skipped at preprocess time with a warning.
+Order of channels follows ascending `label`. wmparc gyral parcels and skull/bone are **not** classes.
 
-## `tracts.yaml` parameter reference
+## `voxdense.yaml` parameter reference
 
 ### `data.paths`
 
 | Key | Meaning |
 |-----|---------|
-| `raw` | Root of raw subject folders (HCP-style) |
-| `processed` | Output of volume/mask preprocess; also training input. The leaf name (e.g. `processed_T1_FA`) becomes the dataset folder under `runs/` |
-| `cache` | Shared artifacts only (prompt `.pt` embeddings) |
-| `runs` | Root for training outputs: `{runs}/{processed_leaf}/{run_name}/{timestamp}/` |
+| `raw` | Root of raw HCP subject folders |
+| `processed` | Output of T1/mask preprocess (`data/processed_dense`). The leaf name becomes the dataset folder under `runs/` |
+| `cache` | Prompt embedding `.pt` files |
+| `runs` | Training outputs: `{runs}/{processed_leaf}/{run_name}/{timestamp}/` |
 
-### `data.modalities`
-
-| Key | Meaning |
-|-----|---------|
-| `primary` | Modality key used as output space and skip source (e.g. `t1`) |
-| `secondary` | Second encoder input (e.g. `t2`; switch to MD by changing this + adding a `volumes` entry) |
-
-These keys must match entries under `data.volumes` and become filenames `{key}.nii.gz` under each processed subject.
-
-### `data.volumes.<modality>`
+### `data.volumes`
 
 | Key | Meaning |
 |-----|---------|
-| `filename` | Raw NIfTI name under `{raw}/{subject}/T1w/` (or `{raw}/{subject}/`) |
-
-`t1` / `t2` here are **on-disk modality ids**, not the Python API names (`primary` / `secondary`).
+| `t1.filename` | Native 1.25 mm T1 (`T1w_acpc_dc_restore_1.25.nii.gz`) — not resampled |
+| `brainmask.filename` | FreeSurfer brainmask, NN onto the T1 grid |
+| `wmparc.filename` | FreeSurfer wmparc, NN onto the T1 grid then collapsed |
 
 ### `data.masks`
 
 | Key | Meaning |
 |-----|---------|
-| `source` | Subfolder under each raw subject that holds per-tract NIfTIs (e.g. `tract_masks_1.25`) |
-| `structures` | Path to `structures.json` |
+| `structures` | Path to `structures_dense.json` |
+
+### `data.nerve_masks`
+
+| Key | Meaning |
+|-----|---------|
+| `root` | Tree used only for holdout detection (e.g. `data/raw`) |
+| `source` | Subfolder that marks Phase 2 holdout subjects (`tract_masks_1.25`) |
 
 ### `data.patch`
 
 | Key | Meaning |
 |-----|---------|
 | `size` | Train / sliding-window crop size `[D, H, W]` |
-| `positive_ratio` | Probability of sampling a crop centered on a positive voxel (train); also drives val mix |
+| `positive_ratio` | Probability of sampling a crop centered on a positive voxel |
 | `train_patches_per_subject` | Independent random crops per subject per training epoch |
 | `val_patches_per_subject` | Frozen crops per subject in val/test |
-| `positive_labels` | Injected from structures (do not edit by hand if using `structures.json`) |
-
-### `data.mock_volume_shape`
-
-Legacy leftover from a removed mock generator. Unused by the current train/preprocess path.
+| `prompts_per_crop` | Foreground name prompts sampled per **train** crop. Background (label 0) is **always** prepended as channel 0 so Dice/BCE stay aligned with full-prompt validation. `0` disables sampling and uses every prompt. Val always uses all prompts. Positive crop centres are **class-balanced** (uniform over present labels) so cortex/WM do not starve small structures. |
+| `positive_labels` | Injected from structures |
 
 ### `preprocessing`
 
 | Key | Meaning |
 |-----|---------|
-| `normalization` | `zscore` or `minmax` for volume preprocess |
-| `zscore_nonzero_only` | If true, mean/std (or min/max) use voxels with `|v| > 0` |
+| `zscore_nonzero_only` | If true, mean/std use voxels with `|v| > 0` |
+| `apply_brainmask` | Zero T1 and labels outside the NN-resampled brainmask |
 
 ### `text_encoder`
 
 | Key | Meaning |
 |-----|---------|
-| `model_name` | Hugging Face id (default PubMedBERT) |
-| `cache_file` | Filename under `data.paths.cache` for the prompt tensor |
+| `model_name` | Hugging Face id (PubMedBERT) |
+| `cache_file` | Filename under `data.paths.cache` (`prompts_dense.pt`) |
 
-`text_dim` on the model must match the encoder hidden size (768 for base PubMedBERT).
+`model.text_dim` must match the encoder hidden size (768 for base PubMedBERT).
 
 ### `model`
 
 | Key | Meaning |
 |-----|---------|
-| `input_channels` | Primary encoder input channels |
-| `secondary_encoder.input_channels` | Secondary encoder channels (defaults to `input_channels` if omitted) |
+| `name` | `VoxDense` |
+| `input_channels` | T1 encoder input channels |
 | `text_dim` | Prompt embedding size |
-| `embed_dim` | Shared visual / attention width (must match last encoder channel) |
-| `num_heads` | Heads for cross-volume and prompt MHA |
+| `embed_dim` | Shared visual / attention width |
+| `num_heads` | Heads for PromptDecoder MHA |
 | `encoder.channels` | Channel widths: stem + each stage (last = bottleneck) |
-| `encoder.strides` | Downsample stride per stage (length = `len(channels) - 1`) |
-| `encoder.kernel_sizes` | Conv kernel per stage |
-| `encoder.paddings` | Conv padding per stage |
-| `encoder.num_resblocks` | Residual blocks per stage after the transition |
+| `encoder.strides` | Downsample stride per stage |
 
-Bottleneck spatial size is `patch.size` divided by the product of `strides` (e.g. 128 / 8 = 16). Changing depth/patch without updating `training.deep_supervision_weights` length will fail at train start.
+Bottleneck spatial size is `patch.size` divided by the product of `strides`. Changing depth/patch without updating `training.deep_supervision_weights` length will fail at train start.
 
 ### `training`
 
 | Key | Meaning |
 |-----|---------|
-| `run_name` | Experiment folder under `runs/{processed_leaf}/` (filesystem-safe). Override per launch with `--name` |
+| `run_name` | Experiment folder under `runs/{processed_leaf}/` |
 | `seed` | Global RNG + train patch sampling |
-| `batch_size` | Patches per GPU step (micro-batch) |
-| `effective_batch_size` | Target batch via gradient accumulation; must be a multiple of `batch_size`. Use `8` or `16` with `batch_size: 2`. Omit or set equal to `batch_size` to disable |
+| `batch_size` | Patches per step |
 | `epochs` | Cosine schedule `T_max` |
 | `learning_rate` | AdamW LR |
-| `bce_pos_weight` | BCE positive-class weight. Scalar: background=1, all tracts=`w`. Or a length-`N_T` list. `1` / omitted = unweighted |
-| `deep_supervision_weights` | Weight per decoder stage (coarse → fine); length must match decoder stages |
-| `dataloader.shuffle` | Shuffle train loader |
-| `dataloader.drop_last` | Drop incomplete train batches |
-| `dataloader.num_workers` | DataLoader workers |
-| `dataloader.pin_memory` | Pin host memory for CUDA |
+| `bce_weight` | Multiplier on the BCE term |
+| `exclude_background` | Soft Dice skips channel 0 when true (default). Dataset sampling always puts background first. |
+| `ignore_empty_targets` | Soft Dice skips channels with zero target mass (default true) so absent structures cannot dominate via FPs. |
+| `deep_supervision_weights` | Weight per decoder stage (coarse → fine) |
+| `checkpoint.monitor` | `loss` or `dice` |
+| `checkpoint.keep` | Keep top-k checkpoints |
 
-#### `training.checkpoint`
-
-| Key | Meaning |
-|-----|---------|
-| `monitor` | `loss` (minimize val loss) or `dice` (maximize Dice) |
-| `dice_scope` | `patch` or `volume` when `monitor=dice` |
-| `keep` | Keep top-k checkpoints by monitor (`vox_whisper_top{r}.pt`, `vox_whisper_best.pt`) |
-| `every` | Also write `vox_whisper_epoch_N.pt` every N epochs if `keep_periodic` |
-| `volume_every` | When `dice_scope=volume`, run full-volume Dice every N epochs |
-| `keep_periodic` | If false, skip periodic epoch files (top-k / latest still written) |
-
-Every epoch also writes `vox_whisper_latest.pt`.
+Every epoch also writes `vox_whisper_latest.pt`. The payload includes `encoder_state_dict` for Phase 2 reload.
 
 ### `splits`
 
 | Key | Meaning |
 |-----|---------|
-| `enabled` | If true, use / create the manifest |
-| `train_ratio` / `val_ratio` / `test_ratio` | Must sum to 1.0 |
+| `train_ratio` / `val_ratio` / `test_ratio` | Must sum to 1.0 (among **pretrain** subjects) |
 | `seed` | Split shuffle + frozen val patch centers |
 | `manifest` | JSON path (`{"train": [...], "val": [...], "test": [...]}`) |
+| `subject_split` | `{"pretrain": [...], "nerve": [...]}` written by preprocess |
 
-### `logging`
+### `logging` / `inference`
 
-Controls optional external experiment-tracking backends.  The JSONL file
-(`metrics.jsonl` in the run directory) is **always** written regardless of
-this setting.
-
-| Key | Meaning |
-|-----|---------|
-| `backend` | `none` (default), `tensorboard`, or `wandb` |
-
-#### `logging.tensorboard`
-
-| Key | Meaning |
-|-----|---------|
-| `log_dir` | Directory for TB event files. Defaults to `<run_dir>/tb_logs/` when `null` |
-
-View with `tensorboard --logdir runs/` — this recurses into every run and lets
-you compare them side-by-side.
-
-#### `logging.wandb`
-
-Requires `pip install wandb` and a valid API key (`wandb login`).
-
-| Key | Meaning |
-|-----|---------|
-| `project` | W&B project name (default `voxwhisper`) |
-| `entity` | W&B username or team slug; `null` uses your default |
-| `tags` | Optional list of string tags attached to the run |
-
-The full config dict is uploaded as hyperparameters automatically.
-`--resume` maps to `wandb.init(resume="allow")`, so the W&B run is
-continued rather than duplicated.
-
-### `inference`
-
-| Key | Meaning |
-|-----|---------|
-| `overlap` | Sliding-window overlap fraction |
-| `mode` | MONAI blend mode (`gaussian` recommended) |
-| `sigma_scale` | Gaussian blend sigma scale |
-| `sw_batch_size` | Crops per sliding-window step |
-| `split` | Default subject split for `evaluate.py` |
-| `output_dir` | Predicted NIfTI root |
-| `checkpoint` | Optional default `.pt` path (CLI `--checkpoint` overrides) |
-| `threshold` | Sigmoid threshold for channel Dice / binarization reporting |
-| `save_probabilities` | If true, also save soft maps |
-| `progress` | Progress bar during sliding window |
-
-## Keys used by `extract_hcp.py` but not in this YAML
-
-Download is optional and AWS-gated. To use `preprocess/extract_hcp.py` you must add (at least):
-
-- `data.paths.raw_masks` — directory of subjects that already have masks (used to decide who to download)
-- `data.download.bucket`, `dataset_prefix`, optional `modalities`, `limit_subjects`, `limit_count`
-
-See [`../preprocess/README.md`](../preprocess/README.md).
+Same JSONL + optional W&B / TensorBoard contract as before. Evaluate uses T1-only sliding windows (`predict_dense_volume`).

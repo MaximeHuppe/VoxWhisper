@@ -6,16 +6,16 @@ SimpleITK>=2.2.0
 dipy>=1.7.0
 
 # Deep Learning & NLP
-torch>=2.0.0
+torch>=2.1.0
 transformers>=4.30.0
 monai>=1.3.0
-boto3>=1.26.0
-botocore>=1.29.0
+
+# Experiment Tracking
+wandb>=0.17.0
 
 # Utilities & Configuration
 pyyaml>=6.0
 tqdm>=4.65.0
-scikit-learn>=1.2.0
 
 # Testing
 pytest>=7.0.0

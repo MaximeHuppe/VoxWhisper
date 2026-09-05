@@ -1,18 +1,12 @@
-"""Model contracts: dynamic encoder depth, PE grid, secondary channels, legacy ckpts."""
+"""Model contracts: encoder depth, PE grid, VoxDense and VoxWhisper forwards."""
 from __future__ import annotations
-
-import sys
-from pathlib import Path
 
 import torch
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-
-from src.models.attention import PositionalEncoding3D, bottleneck_spatial_size
-from src.models.encoder import Encoder
-from src.models.vox_whisper import VoxWhisper
-from src.training.checkpoint import remap_legacy_state_dict
-from src.utils.config import load_config
+from voxwhisper.models.attention import PositionalEncoding3D, bottleneck_spatial_size
+from voxwhisper.models.encoder import Encoder
+from voxwhisper.models.vox_dense import VoxDense
+from voxwhisper.models.vox_whisper import VoxWhisper
 
 
 def test_bottleneck_spatial_size_from_patch_and_strides():
@@ -38,14 +32,58 @@ def test_encoder_returns_bottleneck_and_skip_list():
     assert skips[2].shape == (1, 24, 4, 4, 4)
 
 
-def test_from_config_pe_matches_patch_and_strides():
-    cfg = load_config()
-    model = VoxWhisper.from_config(cfg)
+def test_voxdense_from_config_pe_matches_patch_and_strides(tmp_config):
+    tmp_config["data"]["patch"]["size"] = [16, 16, 16]
+    model = VoxDense.from_config(tmp_config)
     expected = bottleneck_spatial_size(
-        cfg["data"]["patch"]["size"], cfg["model"]["encoder"]["strides"]
+        tmp_config["data"]["patch"]["size"], tmp_config["model"]["encoder"]["strides"]
     )
-    pe = model.cross_volume_attention.pos_primary
+    pe = model.prompt_decoder.pos_encoder
     assert (pe.d_size, pe.h_size, pe.w_size) == expected
+
+
+def test_voxdense_has_no_fa_modules(tmp_config):
+    model = VoxDense.from_config(tmp_config)
+    names = {name for name, _ in model.named_children()}
+    assert "encoder" in names
+    assert "secondary_encoder" not in names
+    assert "cross_volume_attention" not in names
+    assert "primary_encoder" not in names
+
+
+def test_voxdense_forward_shape():
+    model = VoxDense(
+        channels=[8, 16],
+        strides=[2],
+        kernel_sizes=[3],
+        paddings=[1],
+        num_resblocks=[1],
+        embed_dim=16,
+        num_heads=2,
+        text_dim=8,
+        pe_size=(8, 8, 8),
+    )
+    n_prompts = 4
+    volume = torch.zeros(1, 1, 16, 16, 16)
+    text = torch.zeros(1, n_prompts, 8)
+    preds = model(volume, text)
+    assert len(preds) == 1
+    assert preds[0].shape == (1, n_prompts, 16, 16, 16)
+
+
+def test_stage_vl_fusion_logits_invariant_to_extra_prompts():
+    """Shared mean-pool gating made logits depend on N_T; per-prompt gate must not."""
+    from voxwhisper.models.decoder import StageVLFusionBlock
+
+    block = StageVLFusionBlock(visual_channels=8, query_dim=8)
+    torch.manual_seed(0)
+    visual = torch.randn(1, 8, 2, 2, 2)
+    q_shared = torch.randn(1, 2, 8)
+    q_extra = torch.cat([q_shared, torch.randn(1, 3, 8)], dim=1)
+
+    _, logits_small = block(visual, q_shared)
+    _, logits_large = block(visual, q_extra)
+    torch.testing.assert_close(logits_small, logits_large[:, :2], atol=1e-5, rtol=1e-5)
 
 
 def test_secondary_encoder_can_use_different_input_channels():
@@ -73,38 +111,29 @@ def test_secondary_encoder_can_use_different_input_channels():
     assert preds[0].shape == (1, 2, 16, 16, 16)
 
 
-def test_positional_encoding_interpolates_when_grid_differs():
+def test_voxwhisper_forward_shape():
+    model = VoxWhisper(
+        channels=[8, 16],
+        strides=[2],
+        kernel_sizes=[3],
+        paddings=[1],
+        num_resblocks=[1],
+        embed_dim=16,
+        num_heads=2,
+        text_dim=8,
+        pe_size=(8, 8, 8),
+    )
+    n_prompts = 4
+    primary = torch.zeros(1, 1, 16, 16, 16)
+    secondary = torch.zeros(1, 1, 16, 16, 16)
+    text = torch.zeros(1, n_prompts, 8)
+    preds = model(primary, secondary, text)
+    assert len(preds) == 1
+    assert preds[0].shape == (1, n_prompts, 16, 16, 16)
+
+
+def test_positional_encoding_shape():
     pe = PositionalEncoding3D(embed_dim=4, d_size=4, h_size=4, w_size=4)
-    tokens = torch.zeros(2, 8, 4)
-    out = pe(tokens, spatial_size=(2, 2, 2))
+    tokens = torch.zeros(2, 64, 4)
+    out = pe(tokens, spatial_size=(4, 4, 4))
     assert out.shape == tokens.shape
-
-
-def test_remap_legacy_encoder_and_pe_keys():
-    legacy = {
-        "t1_encoder.stem.0.weight": torch.zeros(1),
-        "t2_encoder.stem.0.weight": torch.zeros(1),
-        "cross_volume_attention.pos_t1.pos_d": torch.zeros(1),
-        "prompt_decoder.text_projection.weight": torch.zeros(1),
-    }
-    remapped = remap_legacy_state_dict(legacy)
-    assert "primary_encoder.stem.0.weight" in remapped
-    assert "secondary_encoder.stem.0.weight" in remapped
-    assert "cross_volume_attention.pos_primary.pos_d" in remapped
-    assert "prompt_decoder.text_projection.weight" in remapped
-    assert "t1_encoder.stem.0.weight" not in remapped
-
-
-if __name__ == "__main__":
-    tests = [
-        test_bottleneck_spatial_size_from_patch_and_strides,
-        test_encoder_returns_bottleneck_and_skip_list,
-        test_from_config_pe_matches_patch_and_strides,
-        test_secondary_encoder_can_use_different_input_channels,
-        test_positional_encoding_interpolates_when_grid_differs,
-        test_remap_legacy_encoder_and_pe_keys,
-    ]
-    for test_fn in tests:
-        test_fn()
-        print(f"ok {test_fn.__name__}")
-    print(f"All {len(tests)} tests passed.")
